@@ -15,6 +15,14 @@
 #include <numeric> // For std::iota
 #include <algorithm> // For std::min
 
+// Define the struct to hold all uncertainty components
+struct UncertaintyComponents {
+    double total_v;     // Total variance
+    double range_v;     // Range uncertainty component
+    double angular_v;   // Angular uncertainty component
+    double aoi_v;       // Angle of incidence uncertainty component
+};
+
 // TEMPORARY: Assume common defaults if raylibconfig.h isn't easily included by a tool's cpp directly.
 // This should ideally come from a config header.
 #ifndef RAYLIB_DOUBLE_RAYS
@@ -27,7 +35,7 @@
 bool saveRayCloudWithUncertainty(
     const std::string& file_name,
     const ray::Cloud& cloud,
-    const std::vector<double>& uncertainties)
+    const std::vector<UncertaintyComponents>& all_uncertainties) // Updated parameter
 {
     if (cloud.rayCount() == 0) {
         std::ofstream ofs(file_name, std::ios::binary | std::ios::out);
@@ -62,15 +70,19 @@ bool saveRayCloudWithUncertainty(
         ofs << "property uchar green" << std::endl;
         ofs << "property uchar blue" << std::endl;
         ofs << "property uchar alpha" << std::endl;
-        ofs << "property double uncertainty" << std::endl;
+        // New properties for individual uncertainties
+        ofs << "property double total_variance" << std::endl; // Renamed from 'uncertainty'
+        ofs << "property double range_variance" << std::endl;
+        ofs << "property double angular_variance" << std::endl;
+        ofs << "property double aoi_variance" << std::endl;
         ofs << "end_header" << std::endl;
         ofs.close();
         return true;
     }
 
-    if (cloud.rayCount() != uncertainties.size()) {
+    if (cloud.rayCount() != all_uncertainties.size()) { // Check against new parameter
         std::cerr << "Error: Mismatch between point cloud size (" << cloud.rayCount()
-                  << ") and uncertainties vector size (" << uncertainties.size() << ")." << std::endl;
+                  << ") and uncertainties vector size (" << all_uncertainties.size() << ")." << std::endl;
         return false;
     }
 
@@ -115,8 +127,12 @@ bool saveRayCloudWithUncertainty(
     ofs << "property uchar blue" << std::endl;
     ofs << "property uchar alpha" << std::endl;
 
-    ofs << "property double uncertainty" << std::endl;
-    using uncertainty_type = double;
+    // Updated uncertainty properties
+    ofs << "property double total_variance" << std::endl;
+    ofs << "property double range_variance" << std::endl;
+    ofs << "property double angular_variance" << std::endl;
+    ofs << "property double aoi_variance" << std::endl;
+    using uncertainty_comp_type = double; // All components are double
 
     ofs << "end_header" << std::endl;
 
@@ -144,8 +160,16 @@ bool saveRayCloudWithUncertainty(
         ofs.write(reinterpret_cast<const char*>(&cloud.colours[i].blue), sizeof(uint8_t));
         ofs.write(reinterpret_cast<const char*>(&cloud.colours[i].alpha), sizeof(uint8_t));
 
-        uncertainty_type unc_val = uncertainties[i];
-        ofs.write(reinterpret_cast<const char*>(&unc_val), sizeof(uncertainty_type));
+        // Write all uncertainty components
+        uncertainty_comp_type total_v_val = all_uncertainties[i].total_v;
+        uncertainty_comp_type range_v_val = all_uncertainties[i].range_v;
+        uncertainty_comp_type angular_v_val = all_uncertainties[i].angular_v;
+        uncertainty_comp_type aoi_v_val = all_uncertainties[i].aoi_v;
+
+        ofs.write(reinterpret_cast<const char*>(&total_v_val), sizeof(uncertainty_comp_type));
+        ofs.write(reinterpret_cast<const char*>(&range_v_val), sizeof(uncertainty_comp_type));
+        ofs.write(reinterpret_cast<const char*>(&angular_v_val), sizeof(uncertainty_comp_type));
+        ofs.write(reinterpret_cast<const char*>(&aoi_v_val), sizeof(uncertainty_comp_type));
 
         if (!ofs.good()) {
             std::cerr << "Error: Failed to write data for point " << i << " to " << file_name << std::endl;
@@ -153,38 +177,39 @@ bool saveRayCloudWithUncertainty(
             return false;
         }
     }
+
     ofs.close();
+    std::cout << "Successfully saved point cloud with detailed uncertainties to " << file_name << std::endl;
     return true;
 }
 
-// Add new parameters c_aoi, epsilon_aoi to CalculatePointUncertainty
-std::vector<double> CalculatePointUncertainty(
+// Modified CalculatePointUncertainty function (remains the same as previous step)
+std::vector<UncertaintyComponents> CalculatePointUncertainty(
     const ray::Cloud& pointCloud,
     double base_range_accuracy,
     double base_angle_accuracy,
     double c_intensity,
     double epsilon,
-    double c_aoi, // New parameter
-    double epsilon_aoi) // New parameter
+    double c_aoi,
+    double epsilon_aoi)
 {
-    std::vector<double> uncertainties;
+    std::vector<UncertaintyComponents> all_uncertainties;
     if (pointCloud.rayCount() == 0) {
-        return uncertainties;
+        return all_uncertainties;
     }
-    uncertainties.reserve(pointCloud.rayCount());
+    all_uncertainties.reserve(pointCloud.rayCount());
 
     double base_range_variance = std::pow(base_range_accuracy, 2);
     double base_angle_variance = std::pow(base_angle_accuracy, 2);
 
-    // TEMPORARY WORKAROUND: Create a non-const copy to generate normals. This is inefficient.
-    ray::Cloud tempCloud = pointCloud; // Inefficient copy for non-const method
+    ray::Cloud tempCloud = pointCloud;
     std::vector<Eigen::Vector3d> surface_normals = tempCloud.generateNormals();
 
     bool normals_valid = (surface_normals.size() == pointCloud.rayCount());
     if (!normals_valid) {
         std::cerr << "Warning: Number of generated normals (" << surface_normals.size()
                   << ") does not match point count (" << pointCloud.rayCount()
-                  << "). Skipping angle of incidence term for all points." << std::endl;
+                  << "). Angle of incidence component will be zero or based on default epsilon." << std::endl;
     }
 
     for (size_t i = 0; i < pointCloud.rayCount(); ++i) {
@@ -202,32 +227,34 @@ std::vector<double> CalculatePointUncertainty(
             intensity_term = epsilon;
         }
 
-        double range_uncertainty_variance = base_range_variance * (1.0 + c_intensity / intensity_term);
-        double angular_uncertainty_variance = range_squared * base_angle_variance;
+        double current_range_v = base_range_variance * (1.0 + c_intensity / intensity_term);
+        double current_angular_v = range_squared * base_angle_variance;
+        double current_aoi_v = 0.0;
 
-        double variance_aoi = 0.0;
         if (normals_valid) {
             Eigen::Vector3d ray_vector = point_pos - origin_pos;
             if (ray_vector.squaredNorm() < 1e-12) {
-                variance_aoi = c_aoi / epsilon_aoi;
+                current_aoi_v = c_aoi / epsilon_aoi;
             } else {
                 Eigen::Vector3d normalized_ray_dir = ray_vector.normalized();
                 const Eigen::Vector3d& surface_normal_at_point = surface_normals[i];
-
                 if (surface_normal_at_point.squaredNorm() < 1e-12) {
-                     variance_aoi = c_aoi / epsilon_aoi;
+                    current_aoi_v = c_aoi / epsilon_aoi;
                 } else {
                     Eigen::Vector3d normalized_surface_normal = surface_normal_at_point.normalized();
                     double cos_theta = std::abs(normalized_ray_dir.dot(normalized_surface_normal));
-                    variance_aoi = c_aoi / (cos_theta + epsilon_aoi);
+                    current_aoi_v = c_aoi / (cos_theta + epsilon_aoi);
                 }
             }
+        } else {
+            current_aoi_v = c_aoi / epsilon_aoi;
         }
 
-        double total_variance = range_uncertainty_variance + angular_uncertainty_variance + variance_aoi;
-        uncertainties.push_back(total_variance);
+        double current_total_v = current_range_v + current_angular_v + current_aoi_v;
+
+        all_uncertainties.push_back({current_total_v, current_range_v, current_angular_v, current_aoi_v});
     }
-    return uncertainties;
+    return all_uncertainties;
 }
 
 void print_usage(int exit_code = 1) {
@@ -252,10 +279,10 @@ void print_usage(int exit_code = 1) {
     std::cout << "  --epsilon <value> (-e <value>)" << std::endl;
     std::cout << "                        Small value for intensity division (intensity term)." << std::endl;
     std::cout << "                        Default: 0.01" << std::endl;
-    std::cout << "  --c_aoi <value>" << std::endl; // No short option
+    std::cout << "  --c_aoi <value>" << std::endl;
     std::cout << "                        Coefficient for angle of incidence effect." << std::endl;
     std::cout << "                        Default: 0.1" << std::endl;
-    std::cout << "  --epsilon_aoi <value>" << std::endl; // No short option
+    std::cout << "  --epsilon_aoi <value>" << std::endl;
     std::cout << "                        Small value for angle of incidence division." << std::endl;
     std::cout << "                        Default: 0.01" << std::endl;
     std::cout << "  --help (-h)           Print this usage message." << std::endl;
@@ -320,8 +347,8 @@ int rayNoiseMain(int argc, char* argv[]) {
     }
 
     if (pointCloud.rayCount() == 0) {
-        std::vector<double> empty_uncertainties;
-        if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, empty_uncertainties)) {
+        // Pass empty vector of UncertaintyComponents to the updated save function
+        if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, {})) {
              std::cerr << "Error: Failed to save empty point cloud header." << std::endl;
              return 1;
         }
@@ -337,14 +364,16 @@ int rayNoiseMain(int argc, char* argv[]) {
         return 1;
     }
 
-    std::vector<double> uncertainties = CalculatePointUncertainty(
+    std::vector<UncertaintyComponents> uncertainty_components = CalculatePointUncertainty(
         pointCloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon, c_aoi, epsilon_aoi);
 
-    if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainties)) {
-        std::cerr << "Error: Failed to save point cloud with uncertainty to " << output_file_str << std::endl;
+    // rayNoiseMain now calls the updated save function directly with uncertainty_components
+    if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainty_components)) {
+        std::cerr << "Error: Failed to save point cloud with detailed uncertainties to " << output_file_str << std::endl;
         return 1;
     }
-    std::cout << "Successfully processed and saved point cloud with uncertainty to " << output_file_str << std::endl;
+    // Success message is now in saveRayCloudWithUncertainty
+    // std::cout << "Successfully processed and saved point cloud with uncertainty to " << output_file_str << std::endl;
 
     return 0;
 }
