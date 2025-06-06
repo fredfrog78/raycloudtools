@@ -24,13 +24,14 @@
 #define RAYLIB_WITH_NORMAL_FIELD 1 // common default
 #endif
 
+// (Ensure RAYLIB_DOUBLE_RAYS and RAYLIB_WITH_NORMAL_FIELD are defined above this)
+
 bool saveRayCloudWithUncertainty(
     const std::string& file_name,
     const ray::Cloud& cloud,
     const std::vector<double>& uncertainties)
 {
     if (cloud.rayCount() == 0) {
-        std::cout << "Warning: Attempting to save an empty point cloud to " << file_name << std::endl;
         std::ofstream ofs(file_name, std::ios::binary | std::ios::out);
         if (!ofs) {
             std::cerr << "Error: Cannot open " << file_name << " for writing." << std::endl;
@@ -63,7 +64,7 @@ bool saveRayCloudWithUncertainty(
         ofs << "property uchar green" << std::endl;
         ofs << "property uchar blue" << std::endl;
         ofs << "property uchar alpha" << std::endl;
-        ofs << "property double uncertainty" << std::endl; // Even for empty, list properties
+        ofs << "property double uncertainty" << std::endl;
         ofs << "end_header" << std::endl;
         ofs.close();
         return true;
@@ -109,6 +110,7 @@ bool saveRayCloudWithUncertainty(
     ofs << "property float rayy" << std::endl;
     ofs << "property float rayz" << std::endl;
 #endif
+    // As per raylib/rayply.cpp, ray vector components (nx/ny/nz or rayx/rayy/rayz) are float
     using ray_comp_type = float;
 
     ofs << "property uchar red" << std::endl;
@@ -121,7 +123,6 @@ bool saveRayCloudWithUncertainty(
 
     ofs << "end_header" << std::endl;
 
-    // Binary data writing
     for (size_t i = 0; i < cloud.rayCount(); ++i) {
         coord_type px = static_cast<coord_type>(cloud.ends[i].x());
         coord_type py = static_cast<coord_type>(cloud.ends[i].y());
@@ -133,35 +134,14 @@ bool saveRayCloudWithUncertainty(
         double time_val = cloud.times[i];
         ofs.write(reinterpret_cast<const char*>(&time_val), sizeof(double));
 
-        Eigen::Vector3d ray_vec = cloud.starts[i] - cloud.ends[i]; // For PLY, often it's view vector (origin - point)
-                                                                  // Or normal (if RAYLIB_WITH_NORMAL_FIELD)
-                                                                  // Here, using (start - end) as 'ray vector'
-                                                                  // If normals are available and desired, use cloud.normals[i]
-#if RAYLIB_WITH_NORMAL_FIELD
-        // Assuming normals are precalculated or available if this path is taken
-        // For now, let's stick to ray vector calculation for consistency unless normals are explicitly loaded/computed
-        // If cloud.normals is populated, use that. Otherwise, this calculation is a placeholder.
-        // Defaulting to (end - start).normalized() if normals are expected but not computed from (start - end)
-        Eigen::Vector3d normal_vec = (cloud.ends[i] - cloud.starts[i]).normalized(); // Example: ray direction as normal
-        if (cloud.normals.size() == cloud.rayCount()){
-            normal_vec = cloud.normals[i];
-        }
-
-        ray_comp_type nx = static_cast<ray_comp_type>(normal_vec.x());
-        ray_comp_type ny = static_cast<ray_comp_type>(normal_vec.y());
-        ray_comp_type nz = static_cast<ray_comp_type>(normal_vec.z());
-        ofs.write(reinterpret_cast<const char*>(&nx), sizeof(ray_comp_type));
-        ofs.write(reinterpret_cast<const char*>(&ny), sizeof(ray_comp_type));
-        ofs.write(reinterpret_cast<const char*>(&nz), sizeof(ray_comp_type));
-#else
-        ray_comp_type rx = static_cast<ray_comp_type>(ray_vec.x());
-        ray_comp_type ry = static_cast<ray_comp_type>(ray_vec.y());
-        ray_comp_type rz = static_cast<ray_comp_type>(ray_vec.z());
-        ofs.write(reinterpret_cast<const char*>(&rx), sizeof(ray_comp_type));
-        ofs.write(reinterpret_cast<const char*>(&ry), sizeof(ray_comp_type));
-        ofs.write(reinterpret_cast<const char*>(&rz), sizeof(ray_comp_type));
-#endif
-
+        // Correctly calculate ray vector from starts and ends
+        Eigen::Vector3d ray_vec = cloud.starts[i] - cloud.ends[i];
+        ray_comp_type rvx = static_cast<ray_comp_type>(ray_vec.x());
+        ray_comp_type rvy = static_cast<ray_comp_type>(ray_vec.y());
+        ray_comp_type rvz = static_cast<ray_comp_type>(ray_vec.z());
+        ofs.write(reinterpret_cast<const char*>(&rvx), sizeof(ray_comp_type));
+        ofs.write(reinterpret_cast<const char*>(&rvy), sizeof(ray_comp_type));
+        ofs.write(reinterpret_cast<const char*>(&rvz), sizeof(ray_comp_type));
 
         ofs.write(reinterpret_cast<const char*>(&cloud.colours[i].red), sizeof(uint8_t));
         ofs.write(reinterpret_cast<const char*>(&cloud.colours[i].green), sizeof(uint8_t));
@@ -173,16 +153,15 @@ bool saveRayCloudWithUncertainty(
 
         if (!ofs.good()) {
             std::cerr << "Error: Failed to write data for point " << i << " to " << file_name << std::endl;
-            ofs.close(); // Close file before returning
+            ofs.close(); // Close file before returning on error
             return false;
         }
     }
 
     ofs.close();
-    // std::cout << "Successfully saved point cloud with uncertainty to " << file_name << std::endl; // Moved to rayNoiseMain
+    // std::cout << "Successfully saved point cloud with uncertainty to " << file_name << std::endl; // Keep it less verbose
     return true;
 }
-
 
 // Function to calculate uncertainty for each point
 std::vector<double> CalculatePointUncertainty(
