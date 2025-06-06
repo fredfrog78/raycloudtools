@@ -3,7 +3,7 @@ set(SOURCES
 )
 
 ras_add_executable(raynoise
-  LIBS raylib cxxopts
+  LIBS raylib
   SOURCES ${SOURCES}
   PROJECT_FOLDER "raycloudtools"
 )
