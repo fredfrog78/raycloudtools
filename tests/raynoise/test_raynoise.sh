@@ -5,7 +5,7 @@ set -e # Exit immediately if a command exits with a non-zero status.
 TOLERANCE=0.000001 # Tolerance for floating point comparisons
 
 # Path to the raynoise executable (assuming it's in the build path or CTest sets it)
-RAYNOISE_EXE="${RAYNOISE_EXE:-./raynoise}" # Default if not set by CTest in local run
+RAYNOISE_EXE="${RAYNOISE_EXE:-raynoise}" # Default if not set by CTest in local run
 BASE_TEST_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # Get dir of this script
 DATA_DIR="${BASE_TEST_DIR}/data"
 
