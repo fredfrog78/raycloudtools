@@ -62,7 +62,7 @@ run_test() {
     echo "Output: $output_ply" | tee -a $LOG_FILE
     echo "Raynoise Args: $raynoise_args" | tee -a $LOG_FILE
 
-    local cmd="$RAYNOISE_EXE -i $input_ply -o $output_ply $raynoise_args"
+    local cmd="$RAYNOISE_EXE $input_ply $output_ply $raynoise_args"
     echo "Executing: $cmd" | tee -a $LOG_FILE
     eval $cmd >> $LOG_FILE 2>&1
 
