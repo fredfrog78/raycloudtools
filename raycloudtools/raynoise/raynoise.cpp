@@ -77,7 +77,7 @@ bool saveRayCloudWithUncertainty(
         ofs << "property double range_variance" << std::endl;
         ofs << "property double angular_variance" << std::endl;
         ofs << "property double aoi_variance" << std::endl;
-        ofs << "property double mixed_pixel_variance" << std::endl; // New property for empty cloud header
+        ofs << "property double mixed_pixel_variance" << std::endl;
         ofs << "end_header" << std::endl;
         ofs.close();
         return true;
@@ -134,7 +134,7 @@ bool saveRayCloudWithUncertainty(
     ofs << "property double range_variance" << std::endl;
     ofs << "property double angular_variance" << std::endl;
     ofs << "property double aoi_variance" << std::endl;
-    ofs << "property double mixed_pixel_variance" << std::endl; // New property
+    ofs << "property double mixed_pixel_variance" << std::endl;
     using uncertainty_comp_type = double;
 
     ofs << "end_header" << std::endl;
@@ -167,13 +167,13 @@ bool saveRayCloudWithUncertainty(
         uncertainty_comp_type range_v_val = all_uncertainties[i].range_v;
         uncertainty_comp_type angular_v_val = all_uncertainties[i].angular_v;
         uncertainty_comp_type aoi_v_val = all_uncertainties[i].aoi_v;
-        uncertainty_comp_type mixed_v_val = all_uncertainties[i].mixed_pixel_v; // Get new component
+        uncertainty_comp_type mixed_v_val = all_uncertainties[i].mixed_pixel_v;
 
         ofs.write(reinterpret_cast<const char*>(&total_v_val), sizeof(uncertainty_comp_type));
         ofs.write(reinterpret_cast<const char*>(&range_v_val), sizeof(uncertainty_comp_type));
         ofs.write(reinterpret_cast<const char*>(&angular_v_val), sizeof(uncertainty_comp_type));
         ofs.write(reinterpret_cast<const char*>(&aoi_v_val), sizeof(uncertainty_comp_type));
-        ofs.write(reinterpret_cast<const char*>(&mixed_v_val), sizeof(uncertainty_comp_type)); // Write new component
+        ofs.write(reinterpret_cast<const char*>(&mixed_v_val), sizeof(uncertainty_comp_type));
 
         if (!ofs.good()) {
             std::cerr << "Error: Failed to write data for point " << i << " to " << file_name << std::endl;
@@ -187,7 +187,6 @@ bool saveRayCloudWithUncertainty(
     return true;
 }
 
-// CalculatePointUncertainty function (should be the version from the previous step)
 std::vector<UncertaintyComponents> CalculatePointUncertainty(
     const ray::Cloud& pointCloud,
     double base_range_accuracy,
@@ -338,13 +337,13 @@ void print_usage(int exit_code = 1) {
     std::cout << "  --k_mixed <value>" << std::endl;
     std::cout << "                        Number of neighbors for mixed pixel detection. Default: 8" << std::endl;
     std::cout << "  --depth_thresh_mixed <value>" << std::endl;
-    std::cout << "                        Depth threshold for mixed pixel detection (m). Default: 0.1" << std::endl;
+    std::cout << "                        Depth threshold for mixed pixel detection (m). Default: 0.05" << std::endl;
     std::cout << "  --min_front_mixed <value>" << std::endl;
-    std::cout << "                        Min front neighbors for mixed pixel detection. Default: 2" << std::endl;
+    std::cout << "                        Min front neighbors for mixed pixel detection. Default: 1" << std::endl;
     std::cout << "  --min_behind_mixed <value>" << std::endl;
-    std::cout << "                        Min behind neighbors for mixed pixel detection. Default: 2" << std::endl;
+    std::cout << "                        Min behind neighbors for mixed pixel detection. Default: 1" << std::endl;
     std::cout << "  --penalty_mixed <value>" << std::endl;
-    std::cout << "                        Variance penalty for detected mixed pixels (m^2). Default: 0.25" << std::endl;
+    std::cout << "                        Variance penalty for detected mixed pixels (m^2). Default: 0.5" << std::endl;
     std::cout << "  --help (-h)           Print this usage message." << std::endl;
     // clang-format on
     exit(exit_code);
@@ -360,11 +359,13 @@ int rayNoiseMain(int argc, char* argv[]) {
     ray::DoubleArgument epsilonArg(1e-9, 1.0, 0.01);
     ray::DoubleArgument cAoiArg(0.0, 10.0, 0.1);
     ray::DoubleArgument epsilonAoiArg(1e-9, 1.0, 0.01);
-    ray::IntArgument kMixedNeighborsArg(1, 50, 8);
-    ray::DoubleArgument depthThreshMixedArg(0.001, 10.0, 0.1);
-    ray::IntArgument minFrontMixedArg(1, 50, 2);
-    ray::IntArgument minBehindMixedArg(1, 50, 2);
-    ray::DoubleArgument penaltyMixedArg(0.0, 100.0, 0.25);
+
+    // New parameters for mixed pixel detection - more aggressive defaults
+    ray::IntArgument kMixedNeighborsArg(1, 50, 8); // min, max, default - k_mixed_neighbors remains 8
+    ray::DoubleArgument depthThreshMixedArg(0.001, 10.0, 0.05); // Default changed from 0.1 to 0.05
+    ray::IntArgument minFrontMixedArg(1, 50, 1);          // Default changed from 2 to 1
+    ray::IntArgument minBehindMixedArg(1, 50, 1);         // Default changed from 2 to 1
+    ray::DoubleArgument penaltyMixedArg(0.0, 100.0, 0.5);   // Default changed from 0.25 to 0.5
 
     ray::OptionalFlagArgument helpFlag("help", 'h');
     ray::OptionalKeyValueArgument baseRangeOpt("base_range_accuracy", 'r', &baseRangeAccuracyArg);
