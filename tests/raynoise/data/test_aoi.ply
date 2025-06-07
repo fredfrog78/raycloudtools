@@ -1,0 +1,26 @@
+ply
+format ascii 1.0
+comment Test for Angle of Incidence uncertainty
+element vertex 10
+property float x
+property float y
+property float z
+property float ox
+property float oy
+property float oz
+property uchar red
+property uchar green
+property uchar blue
+property uchar alpha
+property double time
+end_header
+1.00 0.00 1.00 0.0 0.0 0.0 255 0 0 128 0.0
+0.00 0.00 1.00 0.0 0.0 0.0 0 255 0 128 0.1
+1.05 0.00 1.00 0.0 0.0 0.0 128 128 128 128 0.2
+0.95 0.00 1.00 0.0 0.0 0.0 128 128 128 128 0.3
+1.00 0.05 1.00 0.0 0.0 0.0 128 128 128 128 0.4
+1.00 -0.05 1.00 0.0 0.0 0.0 128 128 128 128 0.5
+0.05 0.00 1.00 0.0 0.0 0.0 128 128 128 128 0.6
+-0.05 0.00 1.00 0.0 0.0 0.0 128 128 128 128 0.7
+0.00 0.05 1.00 0.0 0.0 0.0 128 128 128 128 0.8
+0.00 -0.05 1.00 0.0 0.0 0.0 128 128 128 128 0.9

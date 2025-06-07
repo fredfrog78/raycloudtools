@@ -1,0 +1,18 @@
+ply
+format ascii 1.0
+comment Test for basic range and angular uncertainty
+element vertex 2
+property float x
+property float y
+property float z
+property float ox
+property float oy
+property float oz
+property uchar red
+property uchar green
+property uchar blue
+property uchar alpha
+property double time
+end_header
+1.0 0.0 0.0 0.0 0.0 0.0 255 0 0 204 0.0
+0.0 2.0 0.0 0.0 0.0 0.0 0 255 0 77  1.0
