@@ -6,6 +6,7 @@
 
 #include "raylib/raycloud.h"
 #include "raylib/rayparse.h"
+#include <nabo/nabo.h> // For Nabo C++ interface
 
 #include <iostream>
 #include <fstream>
@@ -14,6 +15,7 @@
 #include <cmath> // For std::pow
 #include <numeric> // For std::iota
 #include <algorithm> // For std::min
+#include <memory> // For std::unique_ptr
 
 // Define the struct to hold all uncertainty components
 struct UncertaintyComponents {
@@ -21,6 +23,7 @@ struct UncertaintyComponents {
     double range_v;     // Range uncertainty component
     double angular_v;   // Angular uncertainty component
     double aoi_v;       // Angle of incidence uncertainty component
+    double mixed_pixel_v; // New component
 };
 
 // TEMPORARY: Assume common defaults if raylibconfig.h isn't easily included by a tool's cpp directly.
@@ -35,7 +38,7 @@ struct UncertaintyComponents {
 bool saveRayCloudWithUncertainty(
     const std::string& file_name,
     const ray::Cloud& cloud,
-    const std::vector<UncertaintyComponents>& all_uncertainties) // Updated parameter
+    const std::vector<UncertaintyComponents>& all_uncertainties)
 {
     if (cloud.rayCount() == 0) {
         std::ofstream ofs(file_name, std::ios::binary | std::ios::out);
@@ -70,17 +73,17 @@ bool saveRayCloudWithUncertainty(
         ofs << "property uchar green" << std::endl;
         ofs << "property uchar blue" << std::endl;
         ofs << "property uchar alpha" << std::endl;
-        // New properties for individual uncertainties
-        ofs << "property double total_variance" << std::endl; // Renamed from 'uncertainty'
+        ofs << "property double total_variance" << std::endl;
         ofs << "property double range_variance" << std::endl;
         ofs << "property double angular_variance" << std::endl;
         ofs << "property double aoi_variance" << std::endl;
+        ofs << "property double mixed_pixel_variance" << std::endl; // New property for empty cloud header
         ofs << "end_header" << std::endl;
         ofs.close();
         return true;
     }
 
-    if (cloud.rayCount() != all_uncertainties.size()) { // Check against new parameter
+    if (cloud.rayCount() != all_uncertainties.size()) {
         std::cerr << "Error: Mismatch between point cloud size (" << cloud.rayCount()
                   << ") and uncertainties vector size (" << all_uncertainties.size() << ")." << std::endl;
         return false;
@@ -127,12 +130,12 @@ bool saveRayCloudWithUncertainty(
     ofs << "property uchar blue" << std::endl;
     ofs << "property uchar alpha" << std::endl;
 
-    // Updated uncertainty properties
     ofs << "property double total_variance" << std::endl;
     ofs << "property double range_variance" << std::endl;
     ofs << "property double angular_variance" << std::endl;
     ofs << "property double aoi_variance" << std::endl;
-    using uncertainty_comp_type = double; // All components are double
+    ofs << "property double mixed_pixel_variance" << std::endl; // New property
+    using uncertainty_comp_type = double;
 
     ofs << "end_header" << std::endl;
 
@@ -160,16 +163,17 @@ bool saveRayCloudWithUncertainty(
         ofs.write(reinterpret_cast<const char*>(&cloud.colours[i].blue), sizeof(uint8_t));
         ofs.write(reinterpret_cast<const char*>(&cloud.colours[i].alpha), sizeof(uint8_t));
 
-        // Write all uncertainty components
         uncertainty_comp_type total_v_val = all_uncertainties[i].total_v;
         uncertainty_comp_type range_v_val = all_uncertainties[i].range_v;
         uncertainty_comp_type angular_v_val = all_uncertainties[i].angular_v;
         uncertainty_comp_type aoi_v_val = all_uncertainties[i].aoi_v;
+        uncertainty_comp_type mixed_v_val = all_uncertainties[i].mixed_pixel_v; // Get new component
 
         ofs.write(reinterpret_cast<const char*>(&total_v_val), sizeof(uncertainty_comp_type));
         ofs.write(reinterpret_cast<const char*>(&range_v_val), sizeof(uncertainty_comp_type));
         ofs.write(reinterpret_cast<const char*>(&angular_v_val), sizeof(uncertainty_comp_type));
         ofs.write(reinterpret_cast<const char*>(&aoi_v_val), sizeof(uncertainty_comp_type));
+        ofs.write(reinterpret_cast<const char*>(&mixed_v_val), sizeof(uncertainty_comp_type)); // Write new component
 
         if (!ofs.good()) {
             std::cerr << "Error: Failed to write data for point " << i << " to " << file_name << std::endl;
@@ -179,11 +183,11 @@ bool saveRayCloudWithUncertainty(
     }
 
     ofs.close();
-    std::cout << "Successfully saved point cloud with detailed uncertainties to " << file_name << std::endl;
+    std::cout << "Successfully saved point cloud with detailed uncertainties (including mixed pixel) to " << file_name << std::endl;
     return true;
 }
 
-// Modified CalculatePointUncertainty function (remains the same as previous step)
+// CalculatePointUncertainty function (should be the version from the previous step)
 std::vector<UncertaintyComponents> CalculatePointUncertainty(
     const ray::Cloud& pointCloud,
     double base_range_accuracy,
@@ -191,7 +195,12 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
     double c_intensity,
     double epsilon,
     double c_aoi,
-    double epsilon_aoi)
+    double epsilon_aoi,
+    int k_mixed_neighbors,
+    double depth_threshold_mixed,
+    int min_front_neighbors_mixed,
+    int min_behind_neighbors_mixed,
+    double variance_mixed_pixel_penalty)
 {
     std::vector<UncertaintyComponents> all_uncertainties;
     if (pointCloud.rayCount() == 0) {
@@ -204,12 +213,20 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
 
     ray::Cloud tempCloud = pointCloud;
     std::vector<Eigen::Vector3d> surface_normals = tempCloud.generateNormals();
-
     bool normals_valid = (surface_normals.size() == pointCloud.rayCount());
     if (!normals_valid) {
-        std::cerr << "Warning: Number of generated normals (" << surface_normals.size()
-                  << ") does not match point count (" << pointCloud.rayCount()
-                  << "). Angle of incidence component will be zero or based on default epsilon." << std::endl;
+        std::cerr << "Warning: Normals generation issue. AoI component may be inaccurate." << std::endl;
+    }
+
+    std::unique_ptr<Nabo::NNSearchD> nns;
+    Eigen::MatrixXd cloud_matrix_eigen;
+
+    if (pointCloud.rayCount() > static_cast<size_t>(k_mixed_neighbors) && k_mixed_neighbors > 0) {
+        cloud_matrix_eigen.resize(3, pointCloud.rayCount());
+        for (size_t i = 0; i < pointCloud.rayCount(); ++i) {
+            cloud_matrix_eigen.col(i) = pointCloud.ends[i];
+        }
+        nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(cloud_matrix_eigen));
     }
 
     for (size_t i = 0; i < pointCloud.rayCount(); ++i) {
@@ -221,28 +238,25 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
 
         uint8_t alpha_intensity = pointCloud.colours[i].alpha;
         float normalized_intensity = static_cast<float>(alpha_intensity) / 255.0f;
-
         double intensity_term = normalized_intensity + epsilon;
-        if (intensity_term <= 0) {
-            intensity_term = epsilon;
-        }
+        if (intensity_term <= 0) { intensity_term = epsilon; }
 
         double current_range_v = base_range_variance * (1.0 + c_intensity / intensity_term);
         double current_angular_v = range_squared * base_angle_variance;
         double current_aoi_v = 0.0;
 
         if (normals_valid) {
-            Eigen::Vector3d ray_vector = point_pos - origin_pos;
-            if (ray_vector.squaredNorm() < 1e-12) {
+            Eigen::Vector3d ray_vector_aoi = point_pos - origin_pos;
+            if (ray_vector_aoi.squaredNorm() < 1e-12) {
                 current_aoi_v = c_aoi / epsilon_aoi;
             } else {
-                Eigen::Vector3d normalized_ray_dir = ray_vector.normalized();
+                Eigen::Vector3d normalized_ray_dir_aoi = ray_vector_aoi.normalized();
                 const Eigen::Vector3d& surface_normal_at_point = surface_normals[i];
                 if (surface_normal_at_point.squaredNorm() < 1e-12) {
                     current_aoi_v = c_aoi / epsilon_aoi;
                 } else {
                     Eigen::Vector3d normalized_surface_normal = surface_normal_at_point.normalized();
-                    double cos_theta = std::abs(normalized_ray_dir.dot(normalized_surface_normal));
+                    double cos_theta = std::abs(normalized_ray_dir_aoi.dot(normalized_surface_normal));
                     current_aoi_v = c_aoi / (cos_theta + epsilon_aoi);
                 }
             }
@@ -250,9 +264,51 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
             current_aoi_v = c_aoi / epsilon_aoi;
         }
 
-        double current_total_v = current_range_v + current_angular_v + current_aoi_v;
+        double current_mixed_pixel_v = 0.0;
+        if (nns && k_mixed_neighbors > 0) {
+            Eigen::VectorXi indices(k_mixed_neighbors + 1);
+            Eigen::VectorXd dists2(k_mixed_neighbors + 1);
 
-        all_uncertainties.push_back({current_total_v, current_range_v, current_angular_v, current_aoi_v});
+            Eigen::Vector3d query_point = pointCloud.ends[i];
+            nns->knn(query_point, indices, dists2, k_mixed_neighbors + 1, 0, Nabo::NNSearchD::SORT_RESULTS | Nabo::NNSearchD::ALLOW_SELF_MATCH);
+
+            Eigen::Vector3d ray_P_i = pointCloud.ends[i] - pointCloud.starts[i];
+            double ray_P_i_norm = ray_P_i.norm();
+            Eigen::Vector3d normalized_ray_P_i;
+            bool ray_P_i_is_valid = (ray_P_i_norm > 1e-9);
+            if(ray_P_i_is_valid) {
+                normalized_ray_P_i = ray_P_i / ray_P_i_norm;
+            }
+
+            int count_front = 0;
+            int count_behind = 0;
+
+            if(ray_P_i_is_valid) {
+                for (int k_idx = 0; k_idx < k_mixed_neighbors + 1; ++k_idx) {
+                    int neighbor_idx = indices(k_idx);
+                    if (static_cast<size_t>(neighbor_idx) == i) continue;
+
+                    Eigen::Vector3d vec_origin_Pi_to_Pj_end = pointCloud.ends[neighbor_idx] - pointCloud.starts[i];
+                    double depth_Pj_on_rayPi = vec_origin_Pi_to_Pj_end.dot(normalized_ray_P_i);
+                    double depth_Pi_on_rayPi = ray_P_i_norm;
+                    double depth_diff = depth_Pj_on_rayPi - depth_Pi_on_rayPi;
+
+                    if (depth_diff < -depth_threshold_mixed) {
+                        count_front++;
+                    }
+                    if (depth_diff > depth_threshold_mixed) {
+                        count_behind++;
+                    }
+                }
+            }
+
+            if (count_front >= min_front_neighbors_mixed && count_behind >= min_behind_neighbors_mixed) {
+                current_mixed_pixel_v = variance_mixed_pixel_penalty;
+            }
+        }
+
+        double current_total_v = current_range_v + current_angular_v + current_aoi_v + current_mixed_pixel_v;
+        all_uncertainties.push_back({current_total_v, current_range_v, current_angular_v, current_aoi_v, current_mixed_pixel_v});
     }
     return all_uncertainties;
 }
@@ -268,23 +324,27 @@ void print_usage(int exit_code = 1) {
     std::cout << std::endl;
     std::cout << "Options:" << std::endl;
     std::cout << "  --base_range_accuracy <value> (-r <value>)" << std::endl;
-    std::cout << "                        Sensor's base 1-sigma range accuracy (m)." << std::endl;
-    std::cout << "                        Default: 0.02" << std::endl;
+    std::cout << "                        Sensor's base 1-sigma range accuracy (m). Default: 0.02" << std::endl;
     std::cout << "  --base_angle_accuracy <value> (-a <value>)" << std::endl;
-    std::cout << "                        Sensor's base 1-sigma angular accuracy (rad)." << std::endl;
-    std::cout << "                        Default: 0.0035" << std::endl;
+    std::cout << "                        Sensor's base 1-sigma angular accuracy (rad). Default: 0.0035" << std::endl;
     std::cout << "  --c_intensity <value> (-c <value>)" << std::endl;
-    std::cout << "                        Coefficient for intensity effect." << std::endl;
-    std::cout << "                        Default: 0.5" << std::endl;
+    std::cout << "                        Coefficient for intensity effect. Default: 0.5" << std::endl;
     std::cout << "  --epsilon <value> (-e <value>)" << std::endl;
-    std::cout << "                        Small value for intensity division (intensity term)." << std::endl;
-    std::cout << "                        Default: 0.01" << std::endl;
+    std::cout << "                        Small value for intensity division (intensity term). Default: 0.01" << std::endl;
     std::cout << "  --c_aoi <value>" << std::endl;
-    std::cout << "                        Coefficient for angle of incidence effect." << std::endl;
-    std::cout << "                        Default: 0.1" << std::endl;
+    std::cout << "                        Coefficient for angle of incidence effect. Default: 0.1" << std::endl;
     std::cout << "  --epsilon_aoi <value>" << std::endl;
-    std::cout << "                        Small value for angle of incidence division." << std::endl;
-    std::cout << "                        Default: 0.01" << std::endl;
+    std::cout << "                        Small value for angle of incidence division. Default: 0.01" << std::endl;
+    std::cout << "  --k_mixed <value>" << std::endl;
+    std::cout << "                        Number of neighbors for mixed pixel detection. Default: 8" << std::endl;
+    std::cout << "  --depth_thresh_mixed <value>" << std::endl;
+    std::cout << "                        Depth threshold for mixed pixel detection (m). Default: 0.1" << std::endl;
+    std::cout << "  --min_front_mixed <value>" << std::endl;
+    std::cout << "                        Min front neighbors for mixed pixel detection. Default: 2" << std::endl;
+    std::cout << "  --min_behind_mixed <value>" << std::endl;
+    std::cout << "                        Min behind neighbors for mixed pixel detection. Default: 2" << std::endl;
+    std::cout << "  --penalty_mixed <value>" << std::endl;
+    std::cout << "                        Variance penalty for detected mixed pixels (m^2). Default: 0.25" << std::endl;
     std::cout << "  --help (-h)           Print this usage message." << std::endl;
     // clang-format on
     exit(exit_code);
@@ -300,6 +360,11 @@ int rayNoiseMain(int argc, char* argv[]) {
     ray::DoubleArgument epsilonArg(1e-9, 1.0, 0.01);
     ray::DoubleArgument cAoiArg(0.0, 10.0, 0.1);
     ray::DoubleArgument epsilonAoiArg(1e-9, 1.0, 0.01);
+    ray::IntArgument kMixedNeighborsArg(1, 50, 8);
+    ray::DoubleArgument depthThreshMixedArg(0.001, 10.0, 0.1);
+    ray::IntArgument minFrontMixedArg(1, 50, 2);
+    ray::IntArgument minBehindMixedArg(1, 50, 2);
+    ray::DoubleArgument penaltyMixedArg(0.0, 100.0, 0.25);
 
     ray::OptionalFlagArgument helpFlag("help", 'h');
     ray::OptionalKeyValueArgument baseRangeOpt("base_range_accuracy", 'r', &baseRangeAccuracyArg);
@@ -308,11 +373,17 @@ int rayNoiseMain(int argc, char* argv[]) {
     ray::OptionalKeyValueArgument epsilonOpt("epsilon", 'e', &epsilonArg);
     ray::OptionalKeyValueArgument cAoiOpt("c_aoi", '\0', &cAoiArg);
     ray::OptionalKeyValueArgument epsilonAoiOpt("epsilon_aoi", '\0', &epsilonAoiArg);
+    ray::OptionalKeyValueArgument kMixedOpt("k_mixed", '\0', &kMixedNeighborsArg);
+    ray::OptionalKeyValueArgument depthThreshMixedOpt("depth_thresh_mixed", '\0', &depthThreshMixedArg);
+    ray::OptionalKeyValueArgument minFrontMixedOpt("min_front_mixed", '\0', &minFrontMixedArg);
+    ray::OptionalKeyValueArgument minBehindMixedOpt("min_behind_mixed", '\0', &minBehindMixedArg);
+    ray::OptionalKeyValueArgument penaltyMixedOpt("penalty_mixed", '\0', &penaltyMixedArg);
 
     std::vector<ray::FixedArgument*> fixedArgs = {&inputFile, &outputFile};
     std::vector<ray::OptionalArgument*> optionalArgs = {
         &helpFlag, &baseRangeOpt, &baseAngleOpt, &cIntensityOpt, &epsilonOpt,
-        &cAoiOpt, &epsilonAoiOpt
+        &cAoiOpt, &epsilonAoiOpt,
+        &kMixedOpt, &depthThreshMixedOpt, &minFrontMixedOpt, &minBehindMixedOpt, &penaltyMixedOpt
     };
 
     if (!ray::parseCommandLine(argc, argv, fixedArgs, optionalArgs)) {
@@ -334,9 +405,18 @@ int rayNoiseMain(int argc, char* argv[]) {
     double epsilon = epsilonArg.value();
     double c_aoi = cAoiArg.value();
     double epsilon_aoi = epsilonAoiArg.value();
+    int k_mixed_neighbors = kMixedNeighborsArg.value();
+    double depth_threshold_mixed = depthThreshMixedArg.value();
+    int min_front_neighbors_mixed = minFrontMixedArg.value();
+    int min_behind_neighbors_mixed = minBehindMixedArg.value();
+    double variance_mixed_pixel_penalty = penaltyMixedArg.value();
 
-    if (epsilon <= 0 || epsilon_aoi <= 0) {
-        std::cerr << "Error: Epsilon values (epsilon, epsilon_aoi) must be positive." << std::endl;
+    if (epsilon <= 0 || epsilon_aoi <= 0 || depth_threshold_mixed <=0) {
+        std::cerr << "Error: Epsilon values (epsilon, epsilon_aoi) and depth_threshold_mixed must be positive." << std::endl;
+        print_usage(1);
+    }
+    if (k_mixed_neighbors <= 0 || min_front_neighbors_mixed <=0 || min_behind_neighbors_mixed <=0) {
+        std::cerr << "Error: Neighbor counts (k_mixed, min_front_mixed, min_behind_mixed) must be positive." << std::endl;
         print_usage(1);
     }
 
@@ -347,8 +427,8 @@ int rayNoiseMain(int argc, char* argv[]) {
     }
 
     if (pointCloud.rayCount() == 0) {
-        // Pass empty vector of UncertaintyComponents to the updated save function
-        if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, {})) {
+        std::vector<UncertaintyComponents> empty_uncertainties;
+        if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, empty_uncertainties)) {
              std::cerr << "Error: Failed to save empty point cloud header." << std::endl;
              return 1;
         }
@@ -364,16 +444,16 @@ int rayNoiseMain(int argc, char* argv[]) {
         return 1;
     }
 
-    std::vector<UncertaintyComponents> uncertainty_components = CalculatePointUncertainty(
-        pointCloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon, c_aoi, epsilon_aoi);
+    std::vector<UncertaintyComponents> uncertainties = CalculatePointUncertainty(
+        pointCloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon,
+        c_aoi, epsilon_aoi,
+        k_mixed_neighbors, depth_threshold_mixed, min_front_neighbors_mixed,
+        min_behind_neighbors_mixed, variance_mixed_pixel_penalty);
 
-    // rayNoiseMain now calls the updated save function directly with uncertainty_components
-    if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainty_components)) {
-        std::cerr << "Error: Failed to save point cloud with detailed uncertainties to " << output_file_str << std::endl;
+    if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainties)) {
+        std::cerr << "Error: Failed to save point cloud with uncertainty to " << output_file_str << std::endl;
         return 1;
     }
-    // Success message is now in saveRayCloudWithUncertainty
-    // std::cout << "Successfully processed and saved point cloud with uncertainty to " << output_file_str << std::endl;
 
     return 0;
 }
