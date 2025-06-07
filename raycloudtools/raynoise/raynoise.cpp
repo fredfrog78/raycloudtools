@@ -210,23 +210,60 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
     double base_range_variance = std::pow(base_range_accuracy, 2);
     double base_angle_variance = std::pow(base_angle_accuracy, 2);
 
-    ray::Cloud tempCloud = pointCloud;
-    std::vector<Eigen::Vector3d> surface_normals = tempCloud.generateNormals();
-    bool normals_valid = (surface_normals.size() == pointCloud.rayCount());
-    if (!normals_valid) {
-        std::cerr << "Warning: Normals generation issue. AoI component may be inaccurate." << std::endl;
+    // --- Normal Generation ---
+    std::vector<Eigen::Vector3d> surface_normals;
+    bool normals_valid = false;
+    const int default_normal_search_size = 16; // Default k for generateNormals in raylib
+
+    // Check if we have enough points for normal generation (k+1 points needed for k neighbors)
+    if (pointCloud.rayCount() > static_cast<size_t>(default_normal_search_size)) {
+        ray::Cloud tempCloud = pointCloud; // Inefficient copy
+        surface_normals = tempCloud.generateNormals(default_normal_search_size);
+        if (surface_normals.size() == pointCloud.rayCount()) {
+            normals_valid = true;
+        } else {
+            std::cerr << "Warning: Normal generation (default k) returned " << surface_normals.size()
+                      << " normals for " << pointCloud.rayCount()
+                      << " points. AoI component may be inaccurate." << std::endl;
+        }
+    } else if (pointCloud.rayCount() > 1) { // Try adaptive if fewer than default_k+1, but more than 1
+        ray::Cloud tempCloud = pointCloud; // Inefficient copy
+        // Request k = N-1 neighbors. Max k is N-1. Min k is 1.
+        int adaptive_search_size = std::max(1, static_cast<int>(pointCloud.rayCount()) - 1);
+        surface_normals = tempCloud.generateNormals(adaptive_search_size);
+        if (surface_normals.size() == pointCloud.rayCount()) {
+            normals_valid = true;
+        } else {
+            std::cerr << "Warning: Normal generation (adaptive k) returned " << surface_normals.size()
+                      << " normals for " << pointCloud.rayCount()
+                      << " points. AoI component may be inaccurate." << std::endl;
+        }
+    } else { // Not enough points (0 or 1)
+        // normals_valid remains false
+        if (pointCloud.rayCount() > 0) { // Only warn if there are points but not enough for normals
+             std::cerr << "Warning: Only " << pointCloud.rayCount()
+                       << " point(s) in cloud. Cannot generate reliable surface normals. AoI component will use fallback." << std::endl;
+        }
     }
 
+    // --- Mixed Pixel Detection Setup ---
     std::unique_ptr<Nabo::NNSearchD> nns;
     Eigen::MatrixXd cloud_matrix_eigen;
-
-    if (pointCloud.rayCount() > static_cast<size_t>(k_mixed_neighbors) && k_mixed_neighbors > 0) {
+    // For k_mixed_neighbors, Nabo::knn needs to find k_mixed_neighbors + 1 points (query point + k others).
+    // The cloud itself must have at least k_mixed_neighbors + 1 points.
+    if (k_mixed_neighbors > 0 && pointCloud.rayCount() > static_cast<size_t>(k_mixed_neighbors)) {
         cloud_matrix_eigen.resize(3, pointCloud.rayCount());
-        for (size_t i = 0; i < pointCloud.rayCount(); ++i) {
-            cloud_matrix_eigen.col(i) = pointCloud.ends[i];
+        for (size_t pt_idx = 0; pt_idx < pointCloud.rayCount(); ++pt_idx) { // Renamed loop var
+            cloud_matrix_eigen.col(pt_idx) = pointCloud.ends[pt_idx];
         }
-        nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(cloud_matrix_eigen));
+        try { // Add try-catch for Nabo setup, though condition should prevent errors.
+            nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(cloud_matrix_eigen));
+        } catch (const Nabo::runtime_error& e) {
+            std::cerr << "Nabo KD-tree creation failed: " << e.what() << std::endl;
+            nns.reset(); // Ensure nns is null if setup fails
+        }
     }
+
 
     for (size_t i = 0; i < pointCloud.rayCount(); ++i) {
         const Eigen::Vector3d& point_pos = pointCloud.ends[i];
@@ -244,12 +281,13 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
         double current_angular_v = range_squared * base_angle_variance;
         double current_aoi_v = 0.0;
 
-        if (normals_valid) {
+        if (normals_valid) { // Only calculate AoI if normals were successfully generated
             Eigen::Vector3d ray_vector_aoi = point_pos - origin_pos;
             if (ray_vector_aoi.squaredNorm() < 1e-12) {
                 current_aoi_v = c_aoi / epsilon_aoi;
             } else {
                 Eigen::Vector3d normalized_ray_dir_aoi = ray_vector_aoi.normalized();
+                // surface_normals should have same size as pointCloud.points if normals_valid is true
                 const Eigen::Vector3d& surface_normal_at_point = surface_normals[i];
                 if (surface_normal_at_point.squaredNorm() < 1e-12) {
                     current_aoi_v = c_aoi / epsilon_aoi;
@@ -259,50 +297,53 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
                     current_aoi_v = c_aoi / (cos_theta + epsilon_aoi);
                 }
             }
-        } else {
+        } else { // Fallback if normals are not valid
             current_aoi_v = c_aoi / epsilon_aoi;
         }
 
         double current_mixed_pixel_v = 0.0;
-        if (nns && k_mixed_neighbors > 0) {
+        // Check nns is not null AND k_mixed_neighbors > 0 AND cloud has enough points for this specific point's KNN
+        // The nns unique_ptr being non-null implies pointCloud.rayCount() > k_mixed_neighbors was true.
+        if (nns) {
             Eigen::VectorXi indices(k_mixed_neighbors + 1);
             Eigen::VectorXd dists2(k_mixed_neighbors + 1);
-
             Eigen::Vector3d query_point = pointCloud.ends[i];
-            nns->knn(query_point, indices, dists2, k_mixed_neighbors + 1, 0, Nabo::NNSearchD::SORT_RESULTS | Nabo::NNSearchD::ALLOW_SELF_MATCH);
 
-            Eigen::Vector3d ray_P_i = pointCloud.ends[i] - pointCloud.starts[i];
-            double ray_P_i_norm = ray_P_i.norm();
-            Eigen::Vector3d normalized_ray_P_i;
-            bool ray_P_i_is_valid = (ray_P_i_norm > 1e-9);
-            if(ray_P_i_is_valid) {
-                normalized_ray_P_i = ray_P_i / ray_P_i_norm;
-            }
+            try { // Add try-catch for Nabo knn call
+                nns->knn(query_point, indices, dists2, k_mixed_neighbors + 1);
 
-            int count_front = 0;
-            int count_behind = 0;
+                Eigen::Vector3d ray_P_i = pointCloud.ends[i] - pointCloud.starts[i];
+                double ray_P_i_norm = ray_P_i.norm();
+                Eigen::Vector3d normalized_ray_P_i;
+                bool ray_P_i_is_valid = (ray_P_i_norm > 1e-9); // Use a small epsilon for floating point norm check
 
-            if(ray_P_i_is_valid) {
-                for (int k_idx = 0; k_idx < k_mixed_neighbors + 1; ++k_idx) {
-                    int neighbor_idx = indices(k_idx);
-                    if (static_cast<size_t>(neighbor_idx) == i) continue;
+                if(ray_P_i_is_valid) {
+                    normalized_ray_P_i = ray_P_i / ray_P_i_norm; // Avoid normalize() on zero vector
+                    int count_front = 0;
+                    int count_behind = 0;
+                    for (int k_idx = 0; k_idx < k_mixed_neighbors + 1; ++k_idx) {
+                        int neighbor_idx = indices(k_idx);
+                        if (static_cast<size_t>(neighbor_idx) == i) continue;
 
-                    Eigen::Vector3d vec_origin_Pi_to_Pj_end = pointCloud.ends[neighbor_idx] - pointCloud.starts[i];
-                    double depth_Pj_on_rayPi = vec_origin_Pi_to_Pj_end.dot(normalized_ray_P_i);
-                    double depth_Pi_on_rayPi = ray_P_i_norm;
-                    double depth_diff = depth_Pj_on_rayPi - depth_Pi_on_rayPi;
+                        Eigen::Vector3d vec_origin_Pi_to_Pj_end = pointCloud.ends[neighbor_idx] - pointCloud.starts[i];
+                        double depth_Pj_on_rayPi = vec_origin_Pi_to_Pj_end.dot(normalized_ray_P_i);
+                        double depth_Pi_on_rayPi = ray_P_i_norm;
+                        double depth_diff = depth_Pj_on_rayPi - depth_Pi_on_rayPi;
 
-                    if (depth_diff < -depth_threshold_mixed) {
-                        count_front++;
+                        if (depth_diff < -depth_threshold_mixed) {
+                            count_front++;
+                        }
+                        if (depth_diff > depth_threshold_mixed) {
+                            count_behind++;
+                        }
                     }
-                    if (depth_diff > depth_threshold_mixed) {
-                        count_behind++;
+                    if (count_front >= min_front_neighbors_mixed && count_behind >= min_behind_neighbors_mixed) {
+                        current_mixed_pixel_v = variance_mixed_pixel_penalty;
                     }
                 }
-            }
-
-            if (count_front >= min_front_neighbors_mixed && count_behind >= min_behind_neighbors_mixed) {
-                current_mixed_pixel_v = variance_mixed_pixel_penalty;
+            } catch (const Nabo::runtime_error& e) {
+                std::cerr << "Nabo kNN search failed for point " << i << ": " << e.what() << std::endl;
+                // current_mixed_pixel_v remains 0
             }
         }
 
@@ -361,11 +402,11 @@ int rayNoiseMain(int argc, char* argv[]) {
     ray::DoubleArgument epsilonAoiArg(1e-9, 1.0, 0.01);
 
     // New parameters for mixed pixel detection - more aggressive defaults
-    ray::IntArgument kMixedNeighborsArg(1, 50, 8); // min, max, default - k_mixed_neighbors remains 8
-    ray::DoubleArgument depthThreshMixedArg(0.001, 10.0, 0.05); // Default changed from 0.1 to 0.05
-    ray::IntArgument minFrontMixedArg(1, 50, 1);          // Default changed from 2 to 1
-    ray::IntArgument minBehindMixedArg(1, 50, 1);         // Default changed from 2 to 1
-    ray::DoubleArgument penaltyMixedArg(0.0, 100.0, 0.5);   // Default changed from 0.25 to 0.5
+    ray::IntArgument kMixedNeighborsArg(1, 50, 8);
+    ray::DoubleArgument depthThreshMixedArg(0.001, 10.0, 0.05);
+    ray::IntArgument minFrontMixedArg(1, 50, 1);
+    ray::IntArgument minBehindMixedArg(1, 50, 1);
+    ray::DoubleArgument penaltyMixedArg(0.0, 100.0, 0.5);
 
     ray::OptionalFlagArgument helpFlag("help", 'h');
     ray::OptionalKeyValueArgument baseRangeOpt("base_range_accuracy", 'r', &baseRangeAccuracyArg);
