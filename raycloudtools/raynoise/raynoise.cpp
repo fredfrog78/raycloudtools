@@ -254,8 +254,8 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
         }
         try {
             nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(cloud_matrix_eigen));
-        } catch (const Nabo::runtime_error& e) {
-            std::cerr << "Nabo KD-tree creation failed: " << e.what() << std::endl;
+        } catch (const std::runtime_error& e) { // Changed to std::runtime_error
+            std::cerr << "Nabo KD-tree creation failed (caught as std::runtime_error): " << e.what() << std::endl;
             nns.reset();
         }
     }
@@ -333,8 +333,8 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
                         current_mixed_pixel_v = variance_mixed_pixel_penalty;
                     }
                 }
-            } catch (const Nabo::runtime_error& e) {
-                std::cerr << "Nabo kNN search failed for point " << i << ": " << e.what() << std::endl;
+            } catch (const std::runtime_error& e) { // Changed to std::runtime_error
+                std::cerr << "Nabo kNN search failed for point " << i << " (caught as std::runtime_error): " << e.what() << std::endl;
             }
         }
 
