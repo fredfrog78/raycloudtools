@@ -161,7 +161,7 @@ run_test() {
 
 # Test Case 1: Basic test (verifying range and angular, isolating others)
 INPUT_BASIC="${DATA_DIR}/test_basic.ply"
-ARGS_BASIC="--c_aoi 0 --variance_mixed_pixel_penalty 0 --c_intensity 0.5 --epsilon 0.01" # Default intensity params
+ARGS_BASIC="--c_aoi 0 --penalty_mixed 0 --c_intensity 0.5 --epsilon 0.01" # Default intensity params
 # P1 (idx 0) in test_basic.ply: total_v=0.00065916, range_v=0.00064691, angular_v=0.00001225, aoi_v=0.0, mixed_pixel_v=0.0
 run_test "Basic_P1" "$INPUT_BASIC" "$ARGS_BASIC" 0 0.00065916 0.00064691 0.00001225 0.0 0.0
 # P2 (idx 1) in test_basic.ply: total_v=0.00109416, range_v=0.00104516, angular_v=0.000049,   aoi_v=0.0, mixed_pixel_v=0.0
@@ -169,7 +169,7 @@ run_test "Basic_P2" "$INPUT_BASIC" "$ARGS_BASIC" 1 0.00109416 0.00104516 0.00004
 
 # Test Case 2: Angle of Incidence test (isolating intensity and mixed pixel)
 INPUT_AOI="${DATA_DIR}/test_aoi.ply"
-ARGS_AOI="--c_intensity 0 --variance_mixed_pixel_penalty 0 --c_aoi 0.1 --epsilon_aoi 0.01" # Default AoI params
+ARGS_AOI="--c_intensity 0 --penalty_mixed 0 --c_aoi 0.1 --epsilon_aoi 0.01" # Default AoI params
 # P1_check (idx 0) in test_aoi.ply: total_v=0.13987286, range_v=0.0004, angular_v=0.0000245, aoi_v=0.13944836, mixed_pixel_v=0.0
 run_test "AoI_P1" "$INPUT_AOI" "$ARGS_AOI" 0 0.13987286 0.0004 0.0000245 0.13944836 0.0
 # P2_check (idx 1) in test_aoi.ply: total_v=0.09942215, range_v=0.0004, angular_v=0.00001225, aoi_v=0.09900990, mixed_pixel_v=0.0
