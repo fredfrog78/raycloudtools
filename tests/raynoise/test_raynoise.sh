@@ -41,17 +41,14 @@ compare_floats() {
     val2_fmt=$(printf "%.20f" "$val2_orig" 2>/dev/null)
     tol_fmt=$(printf "%.20f" "$tol_orig" 2>/dev/null)
 
-    # Basic check if printf produced something that looks like a number.
-    # This regex is simple and might not cover all valid float formats from printf, but catches obvious errors.
-    local num_regex='^-?[0-9]+([.][0-9]+)?$'
+    # Updated regex to handle numbers like .5, -.5, 0.5, -0.5, 123, 123.5
+    local num_regex='^-?([0-9]+([.][0-9]*)?|[.][0-9]+|[0-9]+)$'
+
     if ! [[ "$val1_fmt" =~ $num_regex && "$val2_fmt" =~ $num_regex && "$tol_fmt" =~ $num_regex ]]; then
         echo "DEBUG: Formatting issue in compare_floats. Original values: v1='$val1_orig', v2='$val2_orig', tol='$tol_orig'. Formatted: v1f='$val1_fmt', v2f='$val2_fmt', tolf='$tol_fmt'" | tee -a $LOG_FILE
-        # Fallback to direct comparison if printf fails badly, though this might hit same bc errors
         val1_fmt=$val1_orig
         val2_fmt=$val2_orig
         tol_fmt=$tol_orig
-        # It might be better to return 1 (fail) directly if formatting fails
-        # For now, let it proceed to bc and potentially fail there, to see bc's error.
     fi
 
     local diff
@@ -78,6 +75,8 @@ compare_floats() {
     if [ "$comparison_result" -eq 1 ]; then # bc returns 1 for true, 0 for false
         return 0 # Difference is within tolerance
     else
+        # Log the actual values being compared if the test fails due to tolerance
+        echo "DEBUG: Comparison failed: abs_diff($abs_diff) > tol_fmt($tol_fmt)" | tee -a $LOG_FILE
         return 1 # Difference is outside tolerance, or comparison_result was not a clean 0 or 1
     fi
 }
