@@ -28,15 +28,57 @@ PASSED_TESTS=0
 # compare_floats val1 val2 tolerance
 # Returns 0 if |val1 - val2| <= tolerance, 1 otherwise
 compare_floats() {
-    local val1=$1
-    local val2=$2
-    local tol=$3
-    local diff=$(echo "$val1 - $val2" | bc -l)
-    local abs_diff=$(echo "if($diff < 0) -$diff else $diff" | bc -l)
-    if (( $(echo "$abs_diff <= $tol" | bc -l) )); then
-        return 0 # True, difference is within tolerance
+    local val1_orig=$1
+    local val2_orig=$2
+    local tol_orig=$3
+
+    # Attempt to format inputs to a consistent high precision for bc
+    local val1_fmt
+    local val2_fmt
+    local tol_fmt
+
+    val1_fmt=$(printf "%.20f" "$val1_orig" 2>/dev/null)
+    val2_fmt=$(printf "%.20f" "$val2_orig" 2>/dev/null)
+    tol_fmt=$(printf "%.20f" "$tol_orig" 2>/dev/null)
+
+    # Basic check if printf produced something that looks like a number.
+    # This regex is simple and might not cover all valid float formats from printf, but catches obvious errors.
+    local num_regex='^-?[0-9]+([.][0-9]+)?$'
+    if ! [[ "$val1_fmt" =~ $num_regex && "$val2_fmt" =~ $num_regex && "$tol_fmt" =~ $num_regex ]]; then
+        echo "DEBUG: Formatting issue in compare_floats. Original values: v1='$val1_orig', v2='$val2_orig', tol='$tol_orig'. Formatted: v1f='$val1_fmt', v2f='$val2_fmt', tolf='$tol_fmt'" | tee -a $LOG_FILE
+        # Fallback to direct comparison if printf fails badly, though this might hit same bc errors
+        val1_fmt=$val1_orig
+        val2_fmt=$val2_orig
+        tol_fmt=$tol_orig
+        # It might be better to return 1 (fail) directly if formatting fails
+        # For now, let it proceed to bc and potentially fail there, to see bc's error.
+    fi
+
+    local diff
+    diff=$(echo "$val1_fmt - $val2_fmt" | bc -l)
+    if [ $? -ne 0 ] || ! [[ "$diff" =~ $num_regex ]]; then
+        echo "ERROR: bc failed to calculate diff. val1_fmt='$val1_fmt', val2_fmt='$val2_fmt'. bc output: '$diff'" | tee -a $LOG_FILE
+        return 1 # bc error
+    fi
+
+    local abs_diff
+    abs_diff=$(echo "if($diff < 0) -$diff else $diff" | bc -l)
+    if [ $? -ne 0 ] || ! [[ "$abs_diff" =~ $num_regex ]]; then
+        echo "ERROR: bc failed to calculate abs_diff. diff='$diff'. bc output: '$abs_diff'" | tee -a $LOG_FILE
+        return 1 # bc error
+    fi
+
+    local comparison_result
+    comparison_result=$(echo "$abs_diff <= $tol_fmt" | bc -l)
+    if [ $? -ne 0 ]; then
+        echo "ERROR: bc failed on comparison. abs_diff='$abs_diff', tol_fmt='$tol_fmt'. bc output: '$comparison_result'" | tee -a $LOG_FILE
+        return 1 # bc error
+    fi
+
+    if [ "$comparison_result" -eq 1 ]; then # bc returns 1 for true, 0 for false
+        return 0 # Difference is within tolerance
     else
-        return 1 # False, difference is outside tolerance
+        return 1 # Difference is outside tolerance, or comparison_result was not a clean 0 or 1
     fi
 }
 
