@@ -74,70 +74,40 @@ run_test() {
 
     echo "Output file created. Verifying contents..." | tee -a $LOG_FILE
 
-    # CRITICAL FLAW: This parsing method assumes ASCII PLY.
-    # raynoise.cpp outputs BINARY PLY. This section WILL NOT WORK as-is.
-    # It needs to be replaced with a utility that can parse binary PLY files.
-    # For this subtask, we proceed with this known incorrect parsing.
-    echo "WARNING: The following parsing assumes ASCII PLY. Actual output is binary." | tee -a $LOG_FILE
-
-    # Assuming fields are: x y z time nx ny nz r g b a total_v range_v angular_v aoi_v mixed_v
-    # For RAYLIB_DOUBLE_RAYS=0 (float coords) and RAYLIB_WITH_NORMAL_FIELD=1 (float normals)
-    # This means 3 (pos) + 1 (time) + 3 (normals) + 4 (rgba) = 11 standard numeric/char fields before our doubles.
-    # So, total_v is field 12, range_v is 13, etc.
-    # If raynoise was outputting ASCII, and properties were in this order:
-    # This is highly dependent on the exact structure of the output PLY.
-    # The number of header lines before vertex data:
-    # ply (1)
-    # format (1)
-    # comment (1)
-    # element vertex X (1)
-    # property x (1)
-    # property y (1)
-    # property z (1)
-    # property time (1)
-    # property nx/rayx (1)
-    # property ny/rayy (1)
-    # property nz/rayz (1)
-    # property red (1)
-    # property green (1)
-    # property blue (1)
-    # property alpha (1)
-    # property total_variance (1)
-    # property range_variance (1)
-    # property angular_variance (1)
-    # property aoi_variance (1)
-    # property mixed_pixel_variance (1)
-    # end_header (1)
-    # Total = 20 header lines. Data starts on line 21.
-    local data_line_num=$((20 + 1 + point_idx))
-
-    # This will likely fail or produce garbage for binary PLY.
+    local python_parser_script="${BASE_TEST_DIR}/parse_binary_ply.py"
     local parsed_values
-    if ! parsed_values=$(sed -n "${data_line_num}p" "$output_ply" 2>/dev/null); then
-        echo "ERROR: Could not extract data line ${data_line_num} (sed failed, likely binary format)." | tee -a $LOG_FILE
-        echo "Test FAILED (parsing): $test_name, Point Index: $point_idx" | tee -a $LOG_FILE
+
+    # Execute python script, redirecting its stderr to LOG_FILE, and capturing its stdout
+    if ! parsed_values=$(python3 "$python_parser_script" "$output_ply" "$point_idx" 2>> "$LOG_FILE"); then
+        echo "ERROR: Python PLY parser script failed (exit code) for $output_ply point $point_idx. See log for python errors." | tee -a $LOG_FILE
+        echo "Test FAILED (parsing script error): $test_name, Point Index: $point_idx" | tee -a $LOG_FILE
         return 1
     fi
 
-    # Assuming the values are the last 5 fields if it were ASCII and space-separated
-    # This is a placeholder for actual binary parsing.
-    # For now, we'll try to extract assuming it's text, acknowledging it's wrong.
-    local actual_total_v=$(echo "$parsed_values" | awk '{field_start=NF-4; print $field_start}')
-    local actual_range_v=$(echo "$parsed_values" | awk '{field_start=NF-3; print $field_start}')
-    local actual_angular_v=$(echo "$parsed_values" | awk '{field_start=NF-2; print $field_start}')
-    local actual_aoi_v=$(echo "$parsed_values" | awk '{field_start=NF-1; print $field_start}')
-    local actual_mixed_v=$(echo "$parsed_values" | awk '{field_start=NF; print $field_start}')
+    # Check if parsed_values is empty (e.g. if python script printed error and exited non-zero but somehow that wasn't caught by 'if !')
+    if [ -z "$parsed_values" ]; then
+        echo "ERROR: Python PLY parser script returned empty output for $output_ply point $point_idx." | tee -a $LOG_FILE
+        echo "Test FAILED (empty parser output): $test_name, Point Index: $point_idx" | tee -a $LOG_FILE
+        return 1
+    fi
 
+    read -r actual_total_v actual_range_v actual_angular_v actual_aoi_v actual_mixed_v <<< "$parsed_values"
 
+    # This check is now for values read by the python script
     if [ -z "$actual_total_v" ] || [ -z "$actual_range_v" ] || [ -z "$actual_angular_v" ] || [ -z "$actual_aoi_v" ] || [ -z "$actual_mixed_v" ] || \
-       ! [[ "$actual_total_v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] ; then # Basic check if it looks like a number
-        echo "ERROR: Failed to parse uncertainty values for point ${point_idx} from $output_ply (likely binary format or parse logic error)." | tee -a $LOG_FILE
-        echo "Parsed line content: $parsed_values" | tee -a $LOG_FILE
-        echo "Test FAILED (parsing): $test_name, Point Index: $point_idx" | tee -a $LOG_FILE
+       ! [[ "$actual_total_v" =~ ^-?[0-9]+(\.[0-9]+)?(\.?[0-9]+e[\+\-][0-9]+)?$ ]] || \
+       ! [[ "$actual_range_v" =~ ^-?[0-9]+(\.[0-9]+)?(\.?[0-9]+e[\+\-][0-9]+)?$ ]] || \
+       ! [[ "$actual_angular_v" =~ ^-?[0-9]+(\.[0-9]+)?(\.?[0-9]+e[\+\-][0-9]+)?$ ]] || \
+       ! [[ "$actual_aoi_v" =~ ^-?[0-9]+(\.[0-9]+)?(\.?[0-9]+e[\+\-][0-9]+)?$ ]] || \
+       ! [[ "$actual_mixed_v" =~ ^-?[0-9]+(\.[0-9]+)?(\.?[0-9]+e[\+\-][0-9]+)?$ ]] ; then
+        echo "ERROR: Failed to parse all five uncertainty values correctly using Python script for point ${point_idx} from $output_ply." | tee -a $LOG_FILE
+        echo "Raw parsed output: '$parsed_values'" | tee -a $LOG_FILE
+        echo "Individual values: Total='${actual_total_v}', Range='${actual_range_v}', Angular='${actual_angular_v}', AoI='${actual_aoi_v}', Mixed='${actual_mixed_v}'" | tee -a $LOG_FILE
+        echo "Test FAILED (parsing values): $test_name, Point Index: $point_idx" | tee -a $LOG_FILE
         return 1
     fi
 
-    echo "Parsed values (ASSUMING ASCII): Total=${actual_total_v}, Range=${actual_range_v}, Angular=${actual_angular_v}, AoI=${actual_aoi_v}, Mixed=${actual_mixed_v}" | tee -a $LOG_FILE
+    echo "Parsed values (via Python): Total=${actual_total_v}, Range=${actual_range_v}, Angular=${actual_angular_v}, AoI=${actual_aoi_v}, Mixed=${actual_mixed_v}" | tee -a $LOG_FILE
     echo "Expected values: Total=${expected_total_v}, Range=${expected_range_v}, Angular=${expected_angular_v}, AoI=${expected_aoi_v}, Mixed=${expected_mixed_v}" | tee -a $LOG_FILE
 
     local all_match=true
