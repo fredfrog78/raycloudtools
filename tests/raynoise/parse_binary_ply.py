@@ -33,14 +33,20 @@ def parse_ply_point_uncertainties(ply_filepath, point_index):
 
         output_values = []
         for field in required_fields:
-            # plyfile provides properties as a list of PlyProperty objects,
-            # but data access is usually by field name on the structured numpy array.
-            # We need to check if the field name exists in the dtype of the data.
-            if field not in vertex_element.data.dtype.names:
-                print(f"Error: Required property '{field}' not found in PLY file's vertex data fields '{ply_filepath}'.", file=sys.stderr)
-                print(f"Available fields: {vertex_element.data.dtype.names}", file=sys.stderr)
+            if field not in vertex_element.data.dtype.names: # Check against dtype.names for actual data fields
+                print(f"Error: Required property '{field}' not found in PLY file's vertex data fields '{ply_filepath}'. Available fields: {list(vertex_element.data.dtype.names)}", file=sys.stderr)
                 return False
-            output_values.append(str(point_data[field]))
+
+            value = point_data[field]
+            # Ensure values are float for formatting, then format to string
+            # Numpy floats (like float32, float64) can be formatted.
+            try:
+                # Format to 15 decimal places to ensure sufficient precision for bc
+                output_values.append(f"{float(value):.15f}")
+            except ValueError:
+                # Should not happen if PLY field is numeric, but as a fallback
+                print(f"Warning: Could not convert value for field '{field}' to float for formatting. Using raw string.", file=sys.stderr)
+                output_values.append(str(value))
 
         print(" ".join(output_values))
         return True
