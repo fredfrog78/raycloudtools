@@ -6,6 +6,7 @@
 #include <map>
 #include <algorithm> // For std::find
 #include <cstring>   // For std::memcpy
+#include <type_traits> // For std::is_same
 
 // Helper to get type size
 size_t getPlyTypeSize(const std::string& type_str) {
@@ -172,7 +173,7 @@ bool parseRayNoiseOutputPly(const std::string& filePath, int pointIndex, RayNois
         }
         const PlyProperty* p = it->second;
         using ValType = std::remove_reference_t<decltype(val_ref)>;
-        if (p->size != sizeof(ValType) && !(std::is_same_v<ValType, float> && p->type_str == "double") && !(std::is_same_v<ValType, double> && p->type_str == "float")) {
+        if (p->size != sizeof(ValType) && !(std::is_same<ValType, float>::value && p->type_str == "double") && !(std::is_same<ValType, double>::value && p->type_str == "float")) {
              // Allow reading float as double or vice versa with appropriate cast, but check other size mismatches.
              // This simple parser assumes types match struct definitions mostly.
         }
