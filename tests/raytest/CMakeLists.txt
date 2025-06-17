@@ -6,8 +6,10 @@ find_package(GTest)
 find_package(Eigen3 QUIET)
 
 set(SOURCES
-  raytests.cpp
-  testmain.cpp
+  raytests.cpp       # Existing raylib tests
+  testmain.cpp       # Existing GTest main
+  raynoise_gtest.cpp # New raynoise GTests
+  raynoise_test_utils.cpp # Utilities for raynoise GTests
 )
 
 add_executable(raytest ${SOURCES})
