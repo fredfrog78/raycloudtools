@@ -52,10 +52,7 @@ add_test(NAME raytest COMMAND raytest --gtest_output=xml:test-reports/
 # Set environment variables and required files for the 'raytest' CTest entry
 # These will be available to the GTests when they run.
 set_tests_properties(raytest PROPERTIES
-  ENVIRONMENT
-    "RAYNOISE_EXE_PATH=$<TARGET_FILE:raynoise>"
-    "RAYNOISE_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/raynoise/data"
-    "RAYNOISE_TEST_OUTPUT_DIR_BASE=${CMAKE_BINARY_DIR}/tests/raynoise_gtest_outputs"
+  ENVIRONMENT "RAYNOISE_EXE_PATH=$<TARGET_FILE:raynoise>;RAYNOISE_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/raynoise/data;RAYNOISE_TEST_OUTPUT_DIR_BASE=${CMAKE_BINARY_DIR}/tests/raynoise_gtest_outputs"
   REQUIRED_FILES "$<TARGET_FILE:raynoise>"
 )
 
