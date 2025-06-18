@@ -94,6 +94,38 @@ bool RAYLIB_EXPORT writeRayNoisePlyChunk(
 );
 bool RAYLIB_EXPORT finalizeRayNoisePlyHeader(std::ofstream &out, unsigned long total_points, unsigned long vertex_count_pos);
 
+// Functions for chunked PLY writing of intermediate file (original data + pass1 normals + variance placeholders)
+bool RAYLIB_EXPORT writeIntermediatePass1PlyHeader(std::ofstream &out, unsigned long &vertex_count_pos);
+
+bool RAYLIB_EXPORT writeIntermediatePass1PlyChunk(
+    std::ofstream &out,
+    const std::vector<Eigen::Vector3d> &starts_orig,
+    const std::vector<Eigen::Vector3d> &ends_orig,
+    const std::vector<double> &times_orig,
+    const std::vector<RGBA> &colours_orig,
+    const std::vector<Eigen::Vector3d> &normals_pass1
+);
+
+bool RAYLIB_EXPORT finalizeIntermediatePass1PlyHeader(std::ofstream &out, unsigned long total_points, unsigned long vertex_count_pos);
+
+// Callback type for reading intermediate PLY in Pass 2
+using ApplyFunctionPass2 = std::function<void(
+    std::vector<Eigen::Vector3d>& starts,      // Original sensor positions (reconstructed)
+    std::vector<Eigen::Vector3d>& ends,        // Point positions
+    std::vector<double>& times,
+    std::vector<RGBA>& colours,
+    std::vector<Eigen::Vector3d>& pass1_normals // Normals from nx_pass1, ny_pass1, nz_pass1 fields
+)>;
+
+// Read intermediate PLY file for Pass 2
+bool RAYLIB_EXPORT readPlyForPass2(
+    const std::string &file_name,
+    ApplyFunctionPass2 apply_func,
+    double max_intensity, // For consistency, though intermediate alpha might not be intensity
+    bool times_optional = false,
+    size_t chunk_size = 1000000
+);
+
 }  // namespace ray
 
 #endif  // RAYLIB_RAYPLY_H

@@ -17,6 +17,22 @@
 #include <memory>           // For std::unique_ptr
 #include <algorithm>        // For std::min, std::max
 #include <numeric>          // For std::iota (if used, currently not)
+#include <deque>            // For potential use in buffer management, though starting with vector
+#include <Eigen/Eigenvalues> // For PCA-based normal estimation
+#include <limits>           // For std::numeric_limits
+#include <cstdio>           // For std::remove (deleting intermediate file)
+
+// Forward declaration for progress reporter if its definition is not included
+// Assuming a dummy or basic ray::Progress might exist or be defined elsewhere if used.
+// For this integration, detailed progress reporting is secondary to structural setup.
+namespace ray {
+    class Progress { // Minimal dummy definition if not available
+    public:
+        void begin(const std::string&, size_t) {}
+        void increment() {}
+        void end() {}
+    };
+}
 
 
 // Define the struct to hold all uncertainty components
@@ -202,10 +218,12 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
     int min_front_neighbors_mixed,
     int min_behind_neighbors_mixed,
     double variance_mixed_pixel_penalty,
-    bool is_chunked_mode = false)
+    bool is_chunked_mode = false,
+    const std::vector<Eigen::Vector3d>* pass1_normals_ptr = nullptr)
 {
-    static bool aoi_warning_issued = false;
-    static bool mixed_pixel_warning_issued = false;
+    static bool aoi_warning_issued = false; // For chunked mode without precomputed normals
+    static bool mixed_pixel_warning_issued_pass2 = false; // Specific for Pass 2's mixed pixel
+    static bool pass1_normals_usage_info_issued = false;
 
     std::vector<UncertaintyComponents> all_uncertainties;
     if (pointCloud.rayCount() == 0) {
@@ -219,14 +237,32 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
     // --- Normal Generation ---
     std::vector<Eigen::Vector3d> surface_normals;
     bool normals_valid = false;
-    if (is_chunked_mode) {
+
+    bool normals_already_provided = (pass1_normals_ptr != nullptr && !pass1_normals_ptr->empty());
+    if (normals_already_provided) {
+        surface_normals = *pass1_normals_ptr;
+        normals_valid = (surface_normals.size() == pointCloud.rayCount());
+        if (!normals_valid) {
+            std::cerr << "Warning: Mismatch between point count (" << pointCloud.rayCount()
+                      << ") and provided Pass 1 normal count (" << surface_normals.size()
+                      << "). AoI may be affected." << std::endl;
+        } else {
+            if (!pass1_normals_usage_info_issued) {
+                 std::cout << "Info: Using pre-computed Pass 1 normals for AoI calculation." << std::endl;
+                 pass1_normals_usage_info_issued = true;
+            }
+        }
+    } else if (is_chunked_mode) {
+        // This is Phase 1 chunked mode OR Pass 2 chunked mode IF pass1_normals_ptr was null/empty.
+        // The latter case should ideally not happen if Pass 2 is invoked correctly.
         if (!aoi_warning_issued) {
-            std::cout << "Warning: Chunked mode active. AoI calculation is simplified (using fallback as normals are not computed per chunk), potentially impacting accuracy. AoI variance may be less precise." << std::endl;
+            std::cout << "Warning: Chunked mode active AND no pre-computed normals provided. AoI calculation is simplified (using fallback), potentially impacting accuracy. AoI variance may be less precise." << std::endl;
             aoi_warning_issued = true;
         }
         // Normals_valid remains false, AoI will use fallback.
     } else {
-        const int default_normal_search_size = 16; // Default k for generateNormals in raylib
+        // Non-chunked mode (original full cloud processing)
+        const int default_normal_search_size = 16;
         if (pointCloud.rayCount() > static_cast<size_t>(default_normal_search_size)) {
             ray::Cloud tempCloud = pointCloud; // Make a mutable copy for generateNormals
             surface_normals = tempCloud.generateNormals(default_normal_search_size);
@@ -258,13 +294,35 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
 
     // --- Mixed Pixel Detection Setup ---
     std::unique_ptr<Nabo::NNSearchD> nns;
-    if (is_chunked_mode) {
-        if (!mixed_pixel_warning_issued) {
-            std::cout << "Warning: Chunked mode active. Mixed Pixel detection is disabled. Mixed pixel variance contribution will be zero." << std::endl;
-            mixed_pixel_warning_issued = true;
+    if (is_chunked_mode) { // This applies to Phase 1 simple chunking AND Pass 2 chunking
+        if (!mixed_pixel_warning_issued_pass2) { // Use a more specific flag if behavior differs by pass
+            std::cout << "Warning: Mixed Pixel detection in chunked mode is performed locally within each processing chunk, which may not capture all large-scale neighborhood effects. Its variance contribution might be zero if no local mixed pixels are found or if k_mixed_neighbors is too small for the chunk." << std::endl;
+            mixed_pixel_warning_issued_pass2 = true;
         }
-        // nns remains nullptr, mixed pixel calculation will be skipped.
-    } else {
+        // For Pass 2 (and Phase 1 simple chunking), NNS is built per-chunk.
+        // This was the original behavior for "is_chunked_mode" before two-pass was introduced.
+        // The "disabled" message was for Phase 1's CalculatePointUncertainty call.
+        // Now, for Pass 2, it *is* calculated but on a per-chunk basis.
+        // The following logic for NNS setup will run if k_mixed_neighbors > 0.
+        // If pass1_normals_ptr is present, it implies Pass 2.
+        // If is_chunked_mode is true (which it is for Pass 2):
+        // The NNS will be built from pointCloud (which is a single chunk in Pass 2).
+        // This is different from Pass 1 global normal calculation.
+        // So, the warning should reflect that mixed pixel is *local* to the chunk.
+        // The original "disabled" message for mixed_pixel_warning_issued (the general one) might still be relevant if
+        // is_chunked_mode is true AND pass1_normals_ptr is null (i.e. old Phase 1 path).
+        // Let's ensure the old `mixed_pixel_warning_issued` is used for the old path,
+        // and `mixed_pixel_warning_issued_pass2` for the new path.
+        // The current code uses a single `mixed_pixel_warning_issued`.
+        // Let's refine this:
+        if (pass1_normals_ptr == nullptr && !aoi_warning_issued) { // Original Phase 1 chunking (no pass1 normals)
+             static bool original_chunked_mixed_pixel_warning = false;
+             if(!original_chunked_mixed_pixel_warning){
+                std::cout << "Warning: Original chunked mode (no Pass 1 normals). Mixed Pixel detection is simplified/local to chunk." << std::endl;
+                original_chunked_mixed_pixel_warning = true;
+             }
+        }
+        // The actual NNS setup for per-chunk mixed pixel (applies to Pass 2 and original chunked mode):
         Eigen::MatrixXd cloud_matrix_eigen;
         if (k_mixed_neighbors > 0 && pointCloud.rayCount() > static_cast<size_t>(k_mixed_neighbors)) {
             cloud_matrix_eigen.resize(3, pointCloud.rayCount());
@@ -397,11 +455,16 @@ void print_usage(int exit_code = 1) {
     std::cout << "  --penalty_mixed <value>" << std::endl;
     std::cout << "                        Variance penalty for detected mixed pixels (m^2). Default: 0.5" << std::endl;
     std::cout << "  --chunk_size <value>" << std::endl;
-    std::cout << "                        Process points in chunks of <N> points. Useful for large files to reduce" << std::endl;
-    std::cout << "                        memory usage. Note: In chunked mode, Angle of Incidence (AoI) and" << std::endl;
-    std::cout << "                        Mixed Pixel uncertainty calculations are currently simplified/disabled," << std::endl;
-    std::cout << "                        potentially affecting accuracy or setting their variance contributions to zero." << std::endl;
-    std::cout << "                        Default: 0 (off)" << std::endl;
+    std::cout << "                        Process points in chunks. If > 0, activates a two-pass mode for large files:" << std::endl;
+    std::cout << "                          Pass 1: Computes robust surface normals across the dataset by processing" << std::endl;
+    std::cout << "                                  overlapping blocks of points and stores data in a temporary file." << std::endl;
+    std::cout << "                                  This allows for accurate Angle of Incidence (AoI) later." << std::endl;
+    std::cout << "                          Pass 2: Reads the intermediate file (with normals) in chunks of <value> size," << std::endl;
+    std::cout << "                                  calculates all uncertainty components, and writes the final output." << std::endl;
+    std::cout << "                        In this two-pass mode, Mixed Pixel detection is performed locally within" << std::endl;
+    std::cout << "                        each chunk in Pass 2. Parameters for Pass 1 normal estimation (k-neighbors," << std::endl;
+    std::cout << "                        block size, overlap) currently use internal defaults." << std::endl;
+    std::cout << "                        If 0, uses original single-pass, full-load processing. Default: 0." << std::endl;
     std::cout << "  --help (-h)           Print this usage message." << std::endl;
     // clang-format on
     exit(exit_code);
@@ -487,130 +550,69 @@ int rayNoiseMain(int argc, char* argv[]) {
     }
 
     if (chunk_size > 0) {
-        std::cout << "Chunked processing active with chunk_size: " << chunk_size << std::endl;
+        // Two-pass chunked strategy
+        std::cout << "Two-pass chunked processing initiated for input: " << input_file_str << std::endl;
+        std::string intermediate_ply_file = input_file_str + ".pass1_normals.tmp.ply";
 
-        std::ofstream out_ply_stream;
-        out_ply_stream.open(output_file_str, std::ios::binary | std::ios::out);
-        if (!out_ply_stream) {
-            std::cerr << "Error: Cannot open " << output_file_str << " for writing." << std::endl;
+        // Parameters for Pass 1 normal generation
+        // TODO: Make these configurable via command line if needed
+        int k_for_normals_pass1 = k_mixed_neighbors; // Use k_mixed as a proxy, or define new param
+        if (k_for_normals_pass1 < 3) k_for_normals_pass1 = 3; // Ensure k is at least 3 for PCA
+        size_t primary_block_size_pass1 = 200000;
+        size_t overlap_size_pass1 = std::max(static_cast<size_t>(k_for_normals_pass1 * 10), static_cast<size_t>(2000)); // Heuristic for overlap
+
+        ray::Progress progress_reporter; // Dummy progress reporter for now
+
+        bool pass1_success = executePass1_GenerateNormalsAndIntermediatePly(
+            input_file_str,
+            intermediate_ply_file,
+            k_for_normals_pass1,
+            primary_block_size_pass1,
+            overlap_size_pass1,
+            progress_reporter
+        );
+
+        if (!pass1_success) {
+            std::cerr << "Error: Pass 1 (Normal Estimation) failed. Aborting." << std::endl;
+            std::remove(intermediate_ply_file.c_str()); // Attempt to clean up
+            return 1;
+        }
+        std::cout << "Pass 1 (Normal Estimation) completed. Intermediate file: " << intermediate_ply_file << std::endl;
+        std::cout << "Starting Pass 2 (Uncertainty Calculation using Pass 1 normals)..." << std::endl;
+
+        // Pass 2: Calculate uncertainty using normals from intermediate file
+        // chunk_size here is the user-provided --chunk_size, controlling Pass 2's own chunking behavior.
+        bool pass2_success = executePass2_CalculateUncertainty(
+            intermediate_ply_file,
+            output_file_str,
+            base_range_accuracy, base_angle_accuracy,
+            c_intensity, epsilon, c_aoi, epsilon_aoi,
+            k_mixed_neighbors, depth_threshold_mixed,
+            min_front_neighbors_mixed, min_behind_neighbors_mixed,
+            variance_mixed_pixel_penalty,
+            chunk_size, // User's chunk_size for Pass 2 read/write chunking
+            progress_reporter
+        );
+
+        if (!pass2_success) {
+            std::cerr << "Error: Pass 2 (Uncertainty Calculation) failed." << std::endl;
+            std::cerr << "Intermediate file with Pass 1 normals kept for debugging: " << intermediate_ply_file << std::endl;
             return 1;
         }
 
-        unsigned long vertex_count_pos = 0;
-        if (!ray::writeRayNoisePlyHeader(out_ply_stream, vertex_count_pos)) {
-            std::cerr << "Error: Failed to write PLY header to " << output_file_str << std::endl;
-            out_ply_stream.close();
-            return 1;
-        }
-
-        unsigned long total_points_written = 0;
-        bool chunk_write_error = false; // Flag to signal error from lambda
-
-        // Lambda needs to capture out_ply_stream, total_points_written, output_file_str, and error flag
-        // Also, all the parameters for CalculatePointUncertainty
-        auto apply_chunk = [&](std::vector<Eigen::Vector3d>& starts_vec, // Renamed from 'starts' to avoid conflict if any param had same name
-                               std::vector<Eigen::Vector3d>& ends_vec,
-                               std::vector<double>& times_vec,
-                               std::vector<ray::RGBA>& colours_vec) {
-            if (chunk_write_error) return; // Stop processing if a previous chunk failed to write
-
-            if (ends_vec.empty()) {
-                std::cout << "Received an empty chunk." << std::endl;
-                return;
-            }
-            // std::cout << "Processing chunk of " << ends_vec.size() << " points." << std::endl; // Verbose
-
-            ray::Cloud chunk_cloud;
-            // The input vectors to the lambda are rvalue references if moved from,
-            // but here they are passed as lvalue refs from readPly's internal loop.
-            // To avoid issues with readPly reusing buffers (if it does), we should copy or ensure it's safe.
-            // Assuming readPly provides fresh vectors or we consume them fully.
-            // For safety in this step, let's copy. If performance becomes an issue, std::move could be revisited
-            // with deeper analysis of readPly's behavior.
-            // However, the function signature for readPly's apply is `std::function<void(std::vector<Eigen::Vector3d> &starts, ...`
-            // which means these are lvalues, not rvalues. So std::move is not appropriate here.
-            chunk_cloud.starts = starts_vec;
-            chunk_cloud.ends = ends_vec;
-            chunk_cloud.times = times_vec;
-            chunk_cloud.colours = colours_vec;
-
-            std::vector<UncertaintyComponents> chunk_uncertainties = CalculatePointUncertainty(
-                chunk_cloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon,
-                c_aoi, epsilon_aoi,
-                k_mixed_neighbors, depth_threshold_mixed, min_front_neighbors_mixed,
-                min_behind_neighbors_mixed, variance_mixed_pixel_penalty, true /* is_chunked_mode */);
-
-            // std::cout << "Calculated uncertainties for chunk of " << chunk_cloud.rayCount() << " points." << std::endl; // Verbose
-
-            std::vector<ray::RayNoiseUncertaintyData> rayply_uncertainties;
-            rayply_uncertainties.reserve(chunk_uncertainties.size());
-            for (const auto& src_unc : chunk_uncertainties) {
-                ray::RayNoiseUncertaintyData dest_unc;
-                dest_unc.total_v = src_unc.total_v;
-                dest_unc.range_v = src_unc.range_v;
-                dest_unc.angular_v = src_unc.angular_v;
-                dest_unc.aoi_v = src_unc.aoi_v;
-                dest_unc.mixed_pixel_v = src_unc.mixed_pixel_v;
-                rayply_uncertainties.push_back(dest_unc);
-            }
-
-            if (!ray::writeRayNoisePlyChunk(out_ply_stream,
-                                         chunk_cloud.starts,
-                                         chunk_cloud.ends,
-                                         chunk_cloud.times,
-                                         chunk_cloud.colours,
-                                         rayply_uncertainties)) {
-                std::cerr << "Error: Failed to write chunk to " << output_file_str << std::endl;
-                chunk_write_error = true; // Signal error to stop further processing
-            } else {
-                total_points_written += chunk_cloud.rayCount();
-            }
-        };
-
-        // Note: The lambda signature was: std::vector<Eigen::Vector3d>& starts, std::vector<Eigen::Vector3d>& starts_vec...
-        // This was a typo from previous step. readPly provides 4 vectors.
-        // Corrected lambda signature for ray::readPly's apply function:
-        auto correct_apply_chunk = [&](std::vector<Eigen::Vector3d>& s, // starts
-                                   std::vector<Eigen::Vector3d>& e, // ends
-                                   std::vector<double>& t,      // times
-                                   std::vector<ray::RGBA>& c) { // colours
-            // Call the previous lambda logic with correct variable names
-            apply_chunk(s, e, t, c);
-        };
-
-
-        bool success = ray::readPly(input_file_str, true, correct_apply_chunk, 0, false, chunk_size);
-
-        if (!success && !chunk_write_error) { // if readPly itself failed, not due to our write error
-            std::cerr << "Error: Failed to process input file in chunks: " << input_file_str << std::endl;
-            out_ply_stream.close();
-            return 1;
-        }
-
-        if (chunk_write_error) {
-             std::cerr << "Due to previous error, chunk processing stopped." << std::endl;
-             // Try to finalize with what we have, or just clean up.
-        }
-
-        if (!ray::finalizeRayNoisePlyHeader(out_ply_stream, total_points_written, vertex_count_pos)) {
-            std::cerr << "Error: Failed to finalize PLY header for " << output_file_str << std::endl;
-            out_ply_stream.close();
-            return 1;
-        }
-
-        out_ply_stream.close();
-        if (!chunk_write_error) {
-            std::cout << "Successfully saved " << total_points_written << " points with uncertainty to "
-                      << output_file_str << " (chunked)." << std::endl;
+        // If both passes succeed, delete the intermediate file
+        if (std::remove(intermediate_ply_file.c_str()) != 0) {
+            std::cerr << "Warning: Could not delete intermediate file: " << intermediate_ply_file << std::endl;
         } else {
-            std::cout << "Attempted to save point cloud with " << total_points_written
-                      << " points to " << output_file_str << " (chunked), but errors occurred." << std::endl;
-            return 1; // Indicate error
+            std::cout << "Successfully deleted intermediate file: " << intermediate_ply_file << std::endl;
         }
 
+        std::cout << "Two-pass chunked processing completed successfully." << std::endl;
 
     } else {
-        // Non-Chunked Path (Existing Logic)
+        // Original Single-Pass (Non-Chunked) Logic
+        // This path is taken if --chunk_size is 0 (or not provided)
+        std::cout << "Single-pass (non-chunked) processing." << std::endl;
         ray::Cloud pointCloud;
         if (!pointCloud.load(input_file_str, true, 0)) {
             std::cerr << "Error: Could not load point cloud from " << input_file_str << std::endl;
@@ -640,7 +642,9 @@ int rayNoiseMain(int argc, char* argv[]) {
             pointCloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon,
             c_aoi, epsilon_aoi,
             k_mixed_neighbors, depth_threshold_mixed, min_front_neighbors_mixed,
-            min_behind_neighbors_mixed, variance_mixed_pixel_penalty, false /* is_chunked_mode */);
+            min_behind_neighbors_mixed, variance_mixed_pixel_penalty,
+            false, /* is_chunked_mode */
+            nullptr /* pass1_normals_ptr */);
 
         if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainties)) {
             std::cerr << "Error: Failed to save point cloud with uncertainty to " << output_file_str << std::endl;
@@ -653,4 +657,480 @@ int rayNoiseMain(int argc, char* argv[]) {
 
 int main(int argc, char* argv[]) {
     return rayNoiseMain(argc, argv);
+}
+
+
+// Pass 1: Read input PLY, generate normals with overlap, write to intermediate PLY
+// (Implementation from previous step - assumed correct and complete)
+bool executePass1_GenerateNormalsAndIntermediatePly(
+    const std::string& input_ply_file,
+    const std::string& intermediate_ply_file,
+    int k_for_normals, // k for k-NN normal estimation
+    size_t primary_block_size, // Number of points in a primary block
+    size_t overlap_size, // Number of points for overlap on each side
+    ray::Progress& progress_reporter); // Existing declaration is fine
+
+
+// Pass 2: Read intermediate PLY (with Pass 1 normals), calculate uncertainty, write final PLY
+bool executePass2_CalculateUncertainty(
+    const std::string& intermediate_ply_file,
+    const std::string& final_output_ply_file,
+    // Pass relevant raynoise parameters needed for CalculatePointUncertainty
+    double base_range_accuracy, double base_angle_accuracy,
+    double c_intensity, double epsilon,
+    double c_aoi, double epsilon_aoi,
+    int k_mixed_neighbors, double depth_threshold_mixed,
+    int min_front_neighbors_mixed, int min_behind_neighbors_mixed,
+    double variance_mixed_pixel_penalty,
+    size_t chunk_size_pass2, // Chunk size for reading intermediate and processing in Pass 2
+    ray::Progress& progress_reporter) // TODO: Integrate progress reporting
+{
+    std::cout << "Starting Pass 2: Calculating uncertainty using Pass 1 normals." << std::endl;
+    std::cout << "  Intermediate Input: " << intermediate_ply_file << std::endl;
+    std::cout << "  Final Output: " << final_output_ply_file << std::endl;
+
+    std::ofstream out_final_ply_stream;
+    out_final_ply_stream.open(final_output_ply_file, std::ios::binary | std::ios::out);
+    if (!out_final_ply_stream) {
+        std::cerr << "Error: Cannot open final output file " << final_output_ply_file << " for writing." << std::endl;
+        return false;
+    }
+
+    unsigned long vertex_count_pos_pass2 = 0;
+    if (!ray::writeRayNoisePlyHeader(out_final_ply_stream, vertex_count_pos_pass2)) {
+        std::cerr << "Error: Failed to write PLY header to final output file " << final_output_ply_file << std::endl;
+        out_final_ply_stream.close();
+        return false;
+    }
+
+    unsigned long total_points_written_pass2 = 0;
+    bool pass2_chunk_write_error = false;
+
+    auto apply_chunk_pass2_lambda =
+        [&](std::vector<Eigen::Vector3d>& starts_orig,
+            std::vector<Eigen::Vector3d>& ends_orig,
+            std::vector<double>& times_orig,
+            std::vector<ray::RGBA>& colours_orig,
+            std::vector<Eigen::Vector3d>& pass1_normals_chunk) {
+
+        if (pass2_chunk_write_error) return;
+        if (ends_orig.empty()) {
+            std::cout << "Pass 2 lambda received empty chunk." << std::endl;
+            return;
+        }
+
+        ray::Cloud chunk_cloud_for_calc;
+        // For CalculatePointUncertainty, starts and ends are original sensor/point positions
+        chunk_cloud_for_calc.starts = std::move(starts_orig);
+        chunk_cloud_for_calc.ends = std::move(ends_orig);
+        chunk_cloud_for_calc.times = std::move(times_orig);
+        chunk_cloud_for_calc.colours = std::move(colours_orig);
+        // Ensure rayCount is implicitly set if ray::Cloud relies on it internally,
+        // or explicitly set it if needed. For now, assuming member vector sizes are used.
+        // chunk_cloud_for_calc.setRayCount(chunk_cloud_for_calc.ends.size()); // If such a method exists/is needed
+
+        // Call CalculatePointUncertainty with Pass 1 normals
+        // is_chunked_mode = true for Pass 2 so Mixed Pixel uses its simplified logic (intra-chunk k-NN)
+        // unless a more advanced inter-chunk Mixed Pixel is developed for Pass 2.
+        std::vector<UncertaintyComponents> chunk_uncertainties = CalculatePointUncertainty(
+            chunk_cloud_for_calc, base_range_accuracy, base_angle_accuracy,
+            c_intensity, epsilon, c_aoi, epsilon_aoi,
+            k_mixed_neighbors, depth_threshold_mixed,
+            min_front_neighbors_mixed, min_behind_neighbors_mixed,
+            variance_mixed_pixel_penalty,
+            true, /* is_chunked_mode for Pass 2 */
+            &pass1_normals_chunk);
+
+        std::vector<ray::RayNoiseUncertaintyData> rayply_uncertainties;
+        rayply_uncertainties.reserve(chunk_uncertainties.size());
+        for (const auto& src_unc : chunk_uncertainties) {
+            rayply_uncertainties.push_back({src_unc.total_v, src_unc.range_v, src_unc.angular_v, src_unc.aoi_v, src_unc.mixed_pixel_v});
+        }
+
+        // Prepare a ray::Cloud for writing the final PLY.
+        // The nx,ny,nz fields in the final PLY should be the Pass 1 normals.
+        // ray::writeRayNoisePlyChunk writes (cloud.starts[i] - cloud.ends[i]) as the normal/ray vector.
+        // So, we need to set cloud.starts[i] = cloud.ends[i] + pass1_normals_chunk[i].
+        ray::Cloud chunk_cloud_for_writing;
+        chunk_cloud_for_writing.ends = chunk_cloud_for_calc.ends; // These were moved into chunk_cloud_for_calc, need to get them back or copy earlier
+                                                                // Corrected: use the vectors received by lambda as they are distinct after move from chunk_cloud_for_calc
+        chunk_cloud_for_writing.times = chunk_cloud_for_calc.times;
+        chunk_cloud_for_writing.colours = chunk_cloud_for_calc.colours;
+        // Re-populate .ends from chunk_cloud_for_calc as it's the owner now
+        // Or, more simply, use the original ends_orig (which is now chunk_cloud_for_calc.ends)
+        // For clarity, let's use the members of chunk_cloud_for_calc
+
+        chunk_cloud_for_writing.starts.resize(chunk_cloud_for_calc.ends.size());
+        for(size_t i = 0; i < chunk_cloud_for_calc.ends.size(); ++i) {
+            chunk_cloud_for_writing.starts[i] = chunk_cloud_for_calc.ends[i] + pass1_normals_chunk[i];
+        }
+        // The original ends were moved to chunk_cloud_for_calc.ends.
+        // We need to ensure chunk_cloud_for_writing.ends gets these values.
+        // Assigning chunk_cloud_for_calc.ends to chunk_cloud_for_writing.ends is fine.
+
+        if (!ray::writeRayNoisePlyChunk(out_final_ply_stream,
+                                     chunk_cloud_for_writing.starts, // These are effectively end_point + pass1_normal
+                                     chunk_cloud_for_calc.ends,      // These are the actual point end coordinates
+                                     chunk_cloud_for_calc.times,
+                                     chunk_cloud_for_calc.colours,
+                                     rayply_uncertainties)) {
+            std::cerr << "Error: Failed to write chunk to final output file." << std::endl;
+            pass2_chunk_write_error = true;
+        } else {
+            total_points_written_pass2 += chunk_cloud_for_calc.ends.size();
+        }
+    };
+
+    bool read_pass2_success = ray::readPlyForPass2(
+        intermediate_ply_file,
+        apply_chunk_pass2_lambda,
+        0.0, /* max_intensity - not critical for intermediate's alpha */
+        false, /* times_optional */
+        chunk_size_pass2);
+
+    if (!read_pass2_success && !pass2_chunk_write_error) {
+        std::cerr << "Error: readPlyForPass2 failed for intermediate file: " << intermediate_ply_file << std::endl;
+        out_final_ply_stream.close();
+        return false;
+    }
+    if (pass2_chunk_write_error) {
+        std::cerr << "Error occurred during Pass 2 chunk writing." << std::endl;
+        out_final_ply_stream.close();
+        return false;
+    }
+
+    if (!ray::finalizeRayNoisePlyHeader(out_final_ply_stream, total_points_written_pass2, vertex_count_pos_pass2)) {
+        std::cerr << "Error: Failed to finalize PLY header for final output file." << std::endl;
+        out_final_ply_stream.close();
+        return false;
+    }
+
+    out_final_ply_stream.close();
+    std::cout << "Pass 2 completed. Total points written to final output file: " << total_points_written_pass2 << std::endl;
+    return true;
+}
+
+
+// Pass 1: Read input PLY, generate normals with overlap, write to intermediate PLY
+// (Implementation from previous step - assumed correct and complete)
+bool executePass1_GenerateNormalsAndIntermediatePly(
+    const std::string& input_ply_file,
+    const std::string& intermediate_ply_file,
+    int k_for_normals, // k for k-NN normal estimation
+    size_t primary_block_size, // Number of points in a primary block
+    size_t overlap_size, // Number of points for overlap on each side
+    ray::Progress& progress_reporter) // TODO: Integrate progress reporting
+{
+    std::cout << "Starting Pass 1: Generating normals and writing intermediate PLY." << std::endl;
+    std::cout << "  Input: " << input_ply_file << std::endl;
+    std::cout << "  Intermediate Output: " << intermediate_ply_file << std::endl;
+    std::cout << "  K for normals: " << k_for_normals << std::endl;
+    std::cout << "  Primary block size: " << primary_block_size << std::endl;
+    std::cout << "  Overlap size: " << overlap_size << std::endl;
+
+    std::ofstream out_intermediate_stream;
+    out_intermediate_stream.open(intermediate_ply_file, std::ios::binary | std::ios::out);
+    if (!out_intermediate_stream) {
+        std::cerr << "Error: Cannot open intermediate file " << intermediate_ply_file << " for writing." << std::endl;
+        return false;
+    }
+
+    unsigned long intermediate_vertex_count_pos = 0;
+    if (!ray::writeIntermediatePass1PlyHeader(out_intermediate_stream, intermediate_vertex_count_pos)) {
+        std::cerr << "Error: Failed to write PLY header to intermediate file " << intermediate_ply_file << std::endl;
+        out_intermediate_stream.close();
+        return false;
+    }
+
+    unsigned long total_points_written_pass1 = 0;
+    bool pass1_error_occurred = false;
+
+    // Buffers for managing overlaps and primary data blocks
+    // Using std::vector for now. std::deque might be more efficient for remove-from-front,
+    // but given fixed block processing, vector move/copy might be okay.
+    std::vector<Eigen::Vector3d> starts_prev_overlap, ends_prev_overlap, times_prev_overlap;
+    std::vector<ray::RGBA> colours_prev_overlap;
+
+    std::vector<Eigen::Vector3d> starts_curr_primary, ends_curr_primary, times_curr_primary;
+    std::vector<ray::RGBA> colours_curr_primary;
+
+    std::vector<Eigen::Vector3d> starts_next_overlap_accum, ends_next_overlap_accum, times_next_overlap_accum;
+    std::vector<ray::RGBA> colours_next_overlap_accum;
+
+    std::vector<Eigen::Vector3d> normals_for_primary_block; // To store computed normals
+
+    // State variables for the lambda
+    size_t points_in_curr_primary_buf = 0;
+    size_t points_in_next_overlap_buf = 0;
+    bool first_block_processed = false; // Tracks if we've processed the very first primary block.
+                                      // Renamed from is_first_block to avoid confusion as it changes after first block.
+
+    size_t input_chunk_offset = 0; // Tracks current position within the incoming chunk from readPly
+
+    // This lambda orchestrates filling buffers and triggering normal computation + writing
+    auto process_block_for_normals_lambda =
+        [&](std::vector<Eigen::Vector3d>& chunk_starts,
+            std::vector<Eigen::Vector3d>& chunk_ends,
+            std::vector<double>& chunk_times,
+            std::vector<ray::RGBA>& chunk_colours,
+            bool is_final_chunk_from_readply) { // readPly needs to signal this
+
+        if (pass1_error_occurred) return;
+
+        std::cout << "  Lambda received chunk of size: " << chunk_ends.size()
+                  << (is_final_chunk_from_readply ? " (final chunk)" : "") << std::endl;
+        input_chunk_offset = 0;
+
+        while(input_chunk_offset < chunk_ends.size()) {
+            // Fill current primary block buffer
+            if (points_in_curr_primary_buf < primary_block_size) {
+                size_t can_add_to_primary = primary_block_size - points_in_curr_primary_buf;
+                size_t remaining_in_chunk = chunk_ends.size() - input_chunk_offset;
+                size_t num_to_add = std::min(can_add_to_primary, remaining_in_chunk);
+
+                starts_curr_primary.insert(starts_curr_primary.end(), chunk_starts.begin() + input_chunk_offset, chunk_starts.begin() + input_chunk_offset + num_to_add);
+                ends_curr_primary.insert(ends_curr_primary.end(), chunk_ends.begin() + input_chunk_offset, chunk_ends.begin() + input_chunk_offset + num_to_add);
+                times_curr_primary.insert(times_curr_primary.end(), chunk_times.begin() + input_chunk_offset, chunk_times.begin() + input_chunk_offset + num_to_add);
+                colours_curr_primary.insert(colours_curr_primary.end(), chunk_colours.begin() + input_chunk_offset, chunk_colours.begin() + input_chunk_offset + num_to_add);
+
+                points_in_curr_primary_buf += num_to_add;
+                input_chunk_offset += num_to_add;
+            }
+
+            // Fill next overlap buffer accumulator
+            if (points_in_curr_primary_buf == primary_block_size && points_in_next_overlap_buf < overlap_size) {
+                 size_t can_add_to_overlap = overlap_size - points_in_next_overlap_buf;
+                 size_t remaining_in_chunk = chunk_ends.size() - input_chunk_offset;
+                 size_t num_to_add = std::min(can_add_to_overlap, remaining_in_chunk);
+
+                starts_next_overlap_accum.insert(starts_next_overlap_accum.end(), chunk_starts.begin() + input_chunk_offset, chunk_starts.begin() + input_chunk_offset + num_to_add);
+                ends_next_overlap_accum.insert(ends_next_overlap_accum.end(), chunk_ends.begin() + input_chunk_offset, chunk_ends.begin() + input_chunk_offset + num_to_add);
+                times_next_overlap_accum.insert(times_next_overlap_accum.end(), chunk_times.begin() + input_chunk_offset, chunk_times.begin() + input_chunk_offset + num_to_add);
+                colours_next_overlap_accum.insert(colours_next_overlap_accum.end(), chunk_colours.begin() + input_chunk_offset, chunk_colours.begin() + input_chunk_offset + num_to_add);
+
+                points_in_next_overlap_buf += num_to_add;
+                input_chunk_offset += num_to_add;
+            }
+
+            // Check if a block is ready for processing
+            bool ready_to_process_block = (points_in_curr_primary_buf == primary_block_size &&
+                                          (points_in_next_overlap_buf == overlap_size || is_final_chunk_from_readply));
+
+            if (is_final_chunk_from_readply && input_chunk_offset == chunk_ends.size() && points_in_curr_primary_buf > 0 && !ready_to_process_block) {
+                 // This is the very end of the file, and current primary is not full but has data.
+                 // It needs to be processed as the last block.
+                 ready_to_process_block = true;
+            }
+
+
+            if (ready_to_process_block) {
+                std::cout << "  Processing block. Primary size: " << ends_curr_primary.size()
+                          << ", Prev Overlap: " << ends_prev_overlap.size()
+                          << ", Next Overlap (Accum): " << ends_next_overlap_accum.size() << std::endl;
+
+                // --- Actual Normal Computation ---
+                size_t n_prev = ends_prev_overlap.size();
+                size_t n_curr = ends_curr_primary.size();
+                size_t n_next = ends_next_overlap_accum.size();
+                size_t total_points_in_combined_block = n_prev + n_curr + n_next;
+
+                normals_for_primary_block.assign(n_curr, Eigen::Vector3d(0,0,1)); // Default normal if anything fails
+
+                if (total_points_in_combined_block < 3 || n_curr == 0) {
+                    std::cerr << "Warning (Pass 1): Not enough points in combined block (" << total_points_in_combined_block
+                              << ") or current primary block is empty (" << n_curr
+                              << ") to compute normals. Using default normals for this primary block." << std::endl;
+                    // normals_for_primary_block is already default. Proceed to write.
+                } else {
+                    Eigen::MatrixXd processing_block_matrix(3, total_points_in_combined_block);
+                    size_t col_idx = 0;
+                    for (const auto& pt : ends_prev_overlap) processing_block_matrix.col(col_idx++) = pt;
+                    for (const auto& pt : ends_curr_primary) processing_block_matrix.col(col_idx++) = pt;
+                    for (const auto& pt : ends_next_overlap_accum) processing_block_matrix.col(col_idx++) = pt;
+
+                    std::unique_ptr<Nabo::NNSearchD> nns;
+                    try {
+                        nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(processing_block_matrix));
+                    } catch (const std::runtime_error& e) {
+                        std::cerr << "Nabo KD-tree creation failed in Pass 1: " << e.what()
+                                  << ". Using default normals for this block." << std::endl;
+                        // normals_for_primary_block is already default. Allow processing to continue with these.
+                        // No need to set pass1_error_occurred as this is a local failure for this block's normals.
+                    }
+
+                    if (nns) { // Only proceed if KD-tree was successfully built
+                        static bool insufficient_neighbors_warning_issued_pass1 = false;
+                        for (size_t i = 0; i < n_curr; ++i) {
+                            const Eigen::Vector3d& current_query_point = ends_curr_primary[i];
+
+                            Eigen::VectorXi indices_eigen(k_for_normals);
+                            Eigen::VectorXd dists2_eigen(k_for_normals);
+
+                            // Query point index in processing_block_matrix is n_prev + i
+                            nns->knn(processing_block_matrix.col(n_prev + i), indices_eigen, dists2_eigen, k_for_normals, 1e-9, Nabo::NNSearchD::ALLOW_SELF_MATCH);
+
+                            int num_found_neighbors = 0;
+                            for (int k = 0; k < k_for_normals; ++k) {
+                                if (dists2_eigen(k) != std::numeric_limits<double>::infinity()) {
+                                    num_found_neighbors++;
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if (num_found_neighbors < 3) {
+                                if (!insufficient_neighbors_warning_issued_pass1) {
+                                    std::cerr << "Warning (Pass 1): Insufficient neighbors (" << num_found_neighbors
+                                              << " found, need at least 3) for point " << (total_points_written_pass1 + i)
+                                              << ". Using default normal (0,0,1). This message appears once per run." << std::endl;
+                                    insufficient_neighbors_warning_issued_pass1 = true;
+                                }
+                                normals_for_primary_block[i] = Eigen::Vector3d(0,0,1); // Already default, but explicit
+                                continue;
+                            }
+
+                            Eigen::MatrixXd neighbor_points(3, num_found_neighbors);
+                            for (int k = 0; k < num_found_neighbors; ++k) {
+                                neighbor_points.col(k) = processing_block_matrix.col(indices_eigen(k));
+                            }
+
+                            Eigen::Vector3d centroid = neighbor_points.rowwise().mean();
+                            Eigen::MatrixXd centered_neighbors = neighbor_points.colwise() - centroid;
+                            Eigen::Matrix3d covariance_matrix = centered_neighbors * centered_neighbors.transpose() / num_found_neighbors;
+
+                            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigensolver(covariance_matrix, Eigen::ComputeEigenvectors);
+                            if (eigensolver.info() != Eigen::Success) {
+                                normals_for_primary_block[i] = Eigen::Vector3d(0,0,1); // Default on solver failure
+                                continue;
+                            }
+                            Eigen::Vector3d normal = eigensolver.eigenvectors().col(0); // Smallest eigenvalue's eigenvector
+
+                            // Orient normal
+                            Eigen::Vector3d ray_vector = starts_curr_primary[i] - ends_curr_primary[i];
+                            if (ray_vector.squaredNorm() > 1e-12) {
+                                if (normal.dot(ray_vector.normalized()) < 0) {
+                                    normal = -normal;
+                                }
+                            } else { // Fallback for zero-length ray vector
+                                if (normal.z() < 0) { // Simplistic orientation towards positive Z
+                                    normal = -normal;
+                                }
+                            }
+                            normals_for_primary_block[i] = normal.normalized(); // Ensure unit normal
+                        }
+                    }
+                }
+                // --- End Actual Normal Computation ---
+
+                if (!ray::writeIntermediatePass1PlyChunk(out_intermediate_stream,
+                                                       starts_curr_primary, ends_curr_primary,
+                                                       times_curr_primary, colours_curr_primary,
+                                                       normals_for_primary_block)) {
+                    std::cerr << "Error: Failed to write intermediate PLY chunk." << std::endl;
+                    pass1_error_occurred = true;
+                    return; // Stop further processing in lambda
+                }
+                total_points_written_pass1 += ends_curr_primary.size();
+                std::cout << "    Written " << ends_curr_primary.size() << " points to intermediate file. Total written: " << total_points_written_pass1 << std::endl;
+
+                // Buffer shifting logic:
+                // Current primary's end becomes new previous overlap
+                starts_prev_overlap.clear(); ends_prev_overlap.clear(); times_prev_overlap.clear(); colours_prev_overlap.clear();
+                if (overlap_size > 0 && ends_curr_primary.size() >= overlap_size) { // Ensure curr_primary is large enough
+                    size_t start_idx = ends_curr_primary.size() - overlap_size;
+                    starts_prev_overlap.assign(starts_curr_primary.begin() + start_idx, starts_curr_primary.end());
+                    ends_prev_overlap.assign(ends_curr_primary.begin() + start_idx, ends_curr_primary.end());
+                    times_prev_overlap.assign(times_curr_primary.begin() + start_idx, times_curr_primary.end());
+                    colours_prev_overlap.assign(colours_curr_primary.begin() + start_idx, colours_curr_primary.end());
+                } else if (overlap_size > 0) { // curr_primary is smaller than overlap_size (e.g. end of file)
+                     starts_prev_overlap = starts_curr_primary; // take all of it
+                     ends_prev_overlap = ends_curr_primary;
+                     times_prev_overlap = times_curr_primary;
+                     colours_prev_overlap = colours_curr_primary;
+                }
+
+
+                // Next accumulated overlap becomes new current primary
+                starts_curr_primary = std::move(starts_next_overlap_accum); // Efficiently move data
+                ends_curr_primary = std::move(ends_next_overlap_accum);
+                times_curr_primary = std::move(times_next_overlap_accum);
+                colours_curr_primary = std::move(colours_next_overlap_accum);
+
+                points_in_curr_primary_buf = ends_curr_primary.size(); // Size of what was next_overlap
+
+                // Clear accumulator for next overlap (already moved from)
+                starts_next_overlap_accum.clear(); ends_next_overlap_accum.clear();
+                times_next_overlap_accum.clear(); colours_next_overlap_accum.clear();
+                points_in_next_overlap_buf = 0;
+
+                first_block_processed = true;
+
+                if (is_final_chunk_from_readply && points_in_curr_primary_buf == 0 && input_chunk_offset == chunk_ends.size()){
+                    // All data from final chunk processed and shifted, and the new primary is empty.
+                    // This means the last real block was processed.
+                    break;
+                }
+            } else {
+                // Not enough data to process a full block yet, and not the end of the file.
+                // Break from while loop to get more data from readPly if current chunk is exhausted.
+                if(input_chunk_offset == chunk_ends.size()) break;
+            }
+        } // end while(input_chunk_offset < chunk_ends.size())
+    };
+
+    // This lambda is a simplified version for ray::readPly, which then calls the main logic.
+    // It needs to track if it's the last call from readPly.
+    // ray::readPly's current interface doesn't explicitly signal the last chunk.
+    // We need to modify readPly or infer it (e.g. if chunk_size < requested_chunk_size).
+    // For now, let's assume a modified readPly or a wrapper that can signal this.
+    // TEMPORARY: We'll call the lambda one more time after readPly finishes to flush remaining data.
+    // This requires process_block_for_normals_lambda to handle is_final_chunk_from_readply = true correctly.
+
+    size_t read_chunk_size_for_pass1 = 1000000; // Configurable: How many points readPly attempts to read each time
+
+    // We need a way to pass the `is_final_chunk` signal.
+    // Modifying `ray::readPly` is outside this scope.
+    // Workaround: `ray::readPly` calls the lambda. After `ray::readPly` returns,
+    // we explicitly call the lambda one last time with `is_final_chunk_from_readply = true`
+    // and an empty input chunk to trigger processing of any remaining buffered points.
+
+    auto readply_adapter_lambda =
+        [&](std::vector<Eigen::Vector3d>& s, std::vector<Eigen::Vector3d>& e,
+            std::vector<double>& t, std::vector<ray::RGBA>& c) {
+        process_block_for_normals_lambda(s, e, t, c, false); // Assume not final during readPly calls
+    };
+
+    bool read_success = ray::readPly(input_ply_file, true, readply_adapter_lambda, 0.0, false, read_chunk_size_for_pass1);
+
+    if (!read_success && !pass1_error_occurred) {
+        std::cerr << "Error: ray::readPly failed for input file: " << input_ply_file << std::endl;
+        out_intermediate_stream.close();
+        return false;
+    }
+
+    // After readPly finishes, call lambda one last time with an empty chunk and final_chunk = true
+    // to process any remaining data in buffers.
+    if (!pass1_error_occurred) {
+        std::vector<Eigen::Vector3d> empty_starts, empty_ends;
+        std::vector<double> empty_times;
+        std::vector<ray::RGBA> empty_colours;
+        std::cout << "Flushing remaining data for Pass 1..." << std::endl;
+        process_block_for_normals_lambda(empty_starts, empty_ends, empty_times, empty_colours, true);
+    }
+
+    if (pass1_error_occurred) { // Check again if error occurred during flushing
+         std::cerr << "Error occurred during Pass 1 processing or flushing." << std::endl;
+         out_intermediate_stream.close();
+         return false;
+    }
+
+    if (!ray::finalizeIntermediatePass1PlyHeader(out_intermediate_stream, total_points_written_pass1, intermediate_vertex_count_pos)) {
+        std::cerr << "Error: Failed to finalize intermediate PLY header for " << intermediate_ply_file << std::endl;
+        out_intermediate_stream.close();
+        return false;
+    }
+
+    out_intermediate_stream.close();
+    std::cout << "Pass 1 completed. Total points written to intermediate file: " << total_points_written_pass1 << std::endl;
+    return true;
 }

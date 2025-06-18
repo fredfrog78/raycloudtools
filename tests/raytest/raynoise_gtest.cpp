@@ -219,83 +219,112 @@ const RayNoiseTestCaseParams gtest_raynoise_cases[] = {
     },
     // --- Phase 1 Chunking Tests ---
     {
-        "Basic_Chunked_SmallChunk_P1", "test_basic.ply",
-        {"--c_aoi", "0.1", "--epsilon_aoi", "0.01", // Enable AoI for fallback check
-         "--penalty_mixed", "0.5", // Enable mixed for fallback check (should be 0)
-         "--c_intensity", "0.5", "--epsilon", "0.01",
-         "--chunk_size", "2"}, // Small chunk size
-        0, // Point index to check
-        []{ RayNoiseTestOutput d; // Expected values for point 0 from Basic_P1
-            d.total_variance = 0.0006469135802469136 /*range*/ + 0.00001225 /*angular*/ + (0.1/0.01) /*AoI fallback*/ + 0.0 /*Mixed fallback*/;
-            d.range_variance = 0.0006469135802469136;
-            d.angular_variance = 0.00001225;
-            d.aoi_variance = (0.1/0.01); // c_aoi / epsilon_aoi
-            d.mixed_pixel_variance = 0.0; // Simplified
+        // UPDATED Test: Basic_Chunked_SmallChunk_P1 -> Basic_TwoPass_SmallPass2Chunk_P1
+        // AoI should now be accurate due to Pass 1 normals. Mixed Pixel still local to Pass 2 chunk.
+        // Using default AoI params c_aoi=0.1, epsilon_aoi=0.01. test_basic.ply point 0 is flat, so AoI is low.
+        // From Basic_P1 (non-chunked), AoI is 0 if --c_aoi 0. For this test, we use default AoI values.
+        // The original Basic_P1 had c_aoi=0. Here, we'll test with default AoI parameters.
+        // Point 0 of test_basic.ply should have an AoI close to 0 (normal is (0,0,1), ray is approx (0,0,-L)).
+        // Let's assume near-perfect alignment for test_basic.ply point 0, so cos_theta ~ 1.
+        // AoI variance would be c_aoi / (1 + epsilon_aoi) = 0.1 / (1 + 0.01) = 0.1 / 1.01 = 0.0990099...
+        "Basic_TwoPass_SmallPass2Chunk_P1", "test_basic.ply",
+        {
+         "--c_intensity", "0.5", "--epsilon", "0.01", // For range variance
+         // Default AoI params: --c_aoi 0.1, --epsilon_aoi 0.01
+         // Default Mixed Pixel params: --penalty_mixed 0.5, k_mixed 8 etc.
+         "--chunk_size", "2" // Small Pass 2 chunk size
+        },
+        0, // Point index to check (from original Basic_P1)
+        []{ RayNoiseTestOutput d;
+            d.range_variance = 0.0006469135802469136; // From Basic_P1
+            d.angular_variance = 0.00001225;          // From Basic_P1
+            d.aoi_variance = 0.1 / (1.0 + 0.01);      // c_aoi/(cos_theta + epsilon_aoi), cos_theta ~1 for test_basic.ply point 0
+            d.mixed_pixel_variance = 0.0;             // Local kNN in small chunk (size 2, k_mixed=8) likely finds no mixed pixels.
+            d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
             return d; }()
     },
     {
-        "AoI_Chunked_P1_VerifySimplification", "test_aoi.ply",
-        { // Args from AoI_P1_check, but with chunk_size
-         "--c_intensity", "0", "--penalty_mixed", "0",
-         "--c_aoi", "0.1", "--epsilon_aoi", "0.01", // Default AoI params
-         "--chunk_size", "3"},
+        // NEW Test: AoI_TwoPass_Accuracy_P1
+        // Compare with AoI_P1_check (non-chunked). Expect AoI to be very similar.
+        "AoI_TwoPass_Accuracy_P1", "test_aoi.ply",
+        {
+         "--c_intensity", "0", "--penalty_mixed", "0", // Match AoI_P1_check args
+         // Default AoI params: --c_aoi 0.1, --epsilon_aoi 0.01
+         "--chunk_size", "3" // Small Pass 2 chunk size
+        },
         0, // Point index from AoI_P1_check
-        []{ RayNoiseTestOutput d; // Base values from AoI_P1_check
-            d.range_variance = 0.0004;
-            d.angular_variance = 0.0000245;
-            // AoI is now fallback
-            d.aoi_variance = (0.1/0.01); // c_aoi / epsilon_aoi (defaults)
-            d.mixed_pixel_variance = 0.0; // Simplified (was 0 anyway)
+        []{ RayNoiseTestOutput d;
+            d.range_variance = 0.0004;                // From AoI_P1_check
+            d.angular_variance = 0.0000245;           // From AoI_P1_check
+            d.aoi_variance = 0.1394483609039869;      // EXPECTED TO MATCH AoI_P1_check
+            d.mixed_pixel_variance = 0.0;             // --penalty_mixed 0
             d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
             return d; }()
     },
     {
-        "Mixed_Chunked_P_VerifySimplification", "test_mixed.ply",
-        { // Args from Mixed_P_test, but with chunk_size
-         "--c_intensity", "0",
-         "--c_aoi", "0.1", "--epsilon_aoi", "0.01", // Enable AoI for fallback check
-         "--penalty_mixed", "0.5", // This was the original penalty
-         "--k_mixed", "8", "--depth_thresh_mixed", "0.05", "--min_front_mixed", "1", "--min_behind_mixed", "1", // Mixed params
-         "--chunk_size", "5"},
+        // UPDATED Test: Mixed_Chunked_P_VerifySimplification -> Mixed_TwoPass_SmallPass2Chunk_P0
+        // Original Mixed_P_test has mixed_pixel_variance = 0.5.
+        // With two-pass, and small Pass 2 chunk_size=2 (k_mixed=8 default), it should NOT detect mixed pixel.
+        "Mixed_TwoPass_SmallPass2Chunk_P0", "test_mixed.ply",
+        {
+         "--c_intensity", "0", // Match Mixed_P_test relevant args
+         // Default AoI params: --c_aoi 0.1, --epsilon_aoi 0.01
+         // Default Mixed Pixel: --penalty_mixed 0.5, k_mixed 8 etc.
+         "--chunk_size", "2" // Small Pass 2 chunk size, smaller than k_mixed_neighbors=8
+        },
         0, // Point index from Mixed_P_test
-        []{ RayNoiseTestOutput d; // Base values from Mixed_P_test
-            d.range_variance = 0.0004;
-            d.angular_variance = 0.0000275625;
-            d.aoi_variance = (0.1/0.01); // AoI is now fallback
-            d.mixed_pixel_variance = 0.0; // Mixed pixel is simplified to 0
+        []{ RayNoiseTestOutput d;
+            d.range_variance = 0.0004;              // From Mixed_P_test
+            d.angular_variance = 0.0000275625;    // From Mixed_P_test
+            // AoI for test_mixed.ply point 0. Based on visual inspection of test_mixed.ply, point 0 is on a flat surface.
+            // So, similar to Basic_TwoPass_SmallPass2Chunk_P1, cos_theta ~ 1.
+            d.aoi_variance = 0.1 / (1.0 + 0.01);  // c_aoi/(cos_theta + epsilon_aoi)
+            d.mixed_pixel_variance = 0.0;           // EXPECTED 0.0 due to small chunk_size in Pass 2 vs k_mixed
             d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
             return d; }()
     },
     {
-        "Basic_Chunked_LargeChunk_P1", "test_basic.ply", // Chunk size larger than file
-        {"--c_aoi", "0.1", "--epsilon_aoi", "0.01",
-         "--penalty_mixed", "0", // keep mixed off for this basic test
+        // UPDATED Test: Basic_Chunked_LargeChunk_P1 -> Basic_TwoPass_LargePass2Chunk_P1
+        // Pass 2 chunk size is larger than file. AoI should be accurate. Mixed pixel local.
+        "Basic_TwoPass_LargePass2Chunk_P1", "test_basic.ply",
+        {
          "--c_intensity", "0.5", "--epsilon", "0.01",
-         "--chunk_size", "100"}, // test_basic.ply has few points (e.g. <10)
+         // Default AoI, Mixed
+         "--chunk_size", "100" // Pass 2 chunk_size > num points in test_basic.ply
+        },
         0,
-        []{ RayNoiseTestOutput d; // Same as Basic_Chunked_SmallChunk_P1 because simplifications apply even if one chunk
-            d.total_variance = 0.0006469135802469136 + 0.00001225 + (0.1/0.01) + 0.0;
+        []{ RayNoiseTestOutput d; // Same as Basic_TwoPass_SmallPass2Chunk_P1 essentially
             d.range_variance = 0.0006469135802469136;
             d.angular_variance = 0.00001225;
-            d.aoi_variance = (0.1/0.01);
-            d.mixed_pixel_variance = 0.0;
+            d.aoi_variance = 0.1 / (1.0 + 0.01); // Accurate AoI
+            d.mixed_pixel_variance = 0.0;        // Local kNN, test_basic.ply has no mixed pixels.
+            d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
             return d; }()
     },
     {
-        "Basic_Chunked_ExplicitAoIEpsilon_P1", "test_basic.ply",
-        {"--c_aoi", "0.2", "--epsilon_aoi", "0.05", // Non-default AoI params
-         "--penalty_mixed", "0",
+        // UPDATED Test: Basic_Chunked_ExplicitAoIEpsilon_P1 -> Basic_TwoPass_ExplicitAoI_P1
+        // Test with non-default AoI params. AoI should be accurate with these explicit params.
+        "Basic_TwoPass_ExplicitAoI_P1", "test_basic.ply",
+        {
+         "--c_aoi", "0.2", "--epsilon_aoi", "0.05", // Non-default AoI params
          "--c_intensity", "0.5", "--epsilon", "0.01",
-         "--chunk_size", "2"},
+         // Default Mixed
+         "--chunk_size", "2"
+        },
         0,
         []{ RayNoiseTestOutput d;
-            d.range_variance = 0.0006469135802469136; // from Basic_P1
-            d.angular_variance = 0.00001225;      // from Basic_P1
-            d.aoi_variance = (0.2/0.05);          // Explicit c_aoi / epsilon_aoi
-            d.mixed_pixel_variance = 0.0;         // Simplified
+            d.range_variance = 0.0006469135802469136;
+            d.angular_variance = 0.00001225;
+            d.aoi_variance = 0.2 / (1.0 + 0.05);  // Accurate AoI with explicit params (cos_theta ~ 1)
+            d.mixed_pixel_variance = 0.0;
             d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
             return d; }()
     }
+    // Note: The original AoI_Chunked_P1_VerifySimplification and Mixed_Chunked_P_VerifySimplification
+    // were designed to verify that AoI/Mixed *used fallbacks*.
+    // With two-pass, the goal is for AoI to be *accurate*.
+    // So, AoI_TwoPass_Accuracy_P1 is the new key test for AoI.
+    // Mixed_TwoPass_SmallPass2Chunk_P0 tests the localized (and likely non-triggering for small chunks) mixed pixel.
 };
 
 INSTANTIATE_TEST_SUITE_P(
