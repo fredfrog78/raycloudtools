@@ -6,6 +6,7 @@
 
 #include "raylib/raycloud.h"
 #include "raylib/rayparse.h"
+#include "raylib/rayply.h" // Added for chunked PLY writing
 #include <nabo/nabo.h>      // For Nabo C++ interface, Nabo::NNSearchD, Nabo::runtime_error
 #include <stdexcept>      // For std::runtime_error (though Nabo might have its own)
 #include <iostream>
@@ -200,8 +201,12 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
     double depth_threshold_mixed,
     int min_front_neighbors_mixed,
     int min_behind_neighbors_mixed,
-    double variance_mixed_pixel_penalty)
+    double variance_mixed_pixel_penalty,
+    bool is_chunked_mode = false)
 {
+    static bool aoi_warning_issued = false;
+    static bool mixed_pixel_warning_issued = false;
+
     std::vector<UncertaintyComponents> all_uncertainties;
     if (pointCloud.rayCount() == 0) {
         return all_uncertainties;
@@ -214,49 +219,64 @@ std::vector<UncertaintyComponents> CalculatePointUncertainty(
     // --- Normal Generation ---
     std::vector<Eigen::Vector3d> surface_normals;
     bool normals_valid = false;
-    const int default_normal_search_size = 16; // Default k for generateNormals in raylib
-
-    if (pointCloud.rayCount() > static_cast<size_t>(default_normal_search_size)) {
-        ray::Cloud tempCloud = pointCloud;
-        surface_normals = tempCloud.generateNormals(default_normal_search_size);
-        if (surface_normals.size() == pointCloud.rayCount()) {
-            normals_valid = true;
-        } else {
-            std::cerr << "Warning: Normal generation (default k) returned " << surface_normals.size()
-                      << " normals for " << pointCloud.rayCount()
-                      << " points. AoI component may be inaccurate." << std::endl;
+    if (is_chunked_mode) {
+        if (!aoi_warning_issued) {
+            std::cout << "Warning: Chunked mode active. AoI calculation is simplified (using fallback as normals are not computed per chunk), potentially impacting accuracy. AoI variance may be less precise." << std::endl;
+            aoi_warning_issued = true;
         }
-    } else if (pointCloud.rayCount() > 1) {
-        ray::Cloud tempCloud = pointCloud;
-        int adaptive_search_size = std::max(1, static_cast<int>(pointCloud.rayCount()) - 1);
-        surface_normals = tempCloud.generateNormals(adaptive_search_size);
-        if (surface_normals.size() == pointCloud.rayCount()) {
-            normals_valid = true;
-        } else {
-            std::cerr << "Warning: Normal generation (adaptive k) returned " << surface_normals.size()
-                      << " normals for " << pointCloud.rayCount()
-                      << " points. AoI component may be inaccurate." << std::endl;
-        }
+        // Normals_valid remains false, AoI will use fallback.
     } else {
-        if (pointCloud.rayCount() > 0) {
-             std::cerr << "Warning: Only " << pointCloud.rayCount()
-                       << " point(s) in cloud. Cannot generate reliable surface normals. AoI component will use fallback." << std::endl;
+        const int default_normal_search_size = 16; // Default k for generateNormals in raylib
+        if (pointCloud.rayCount() > static_cast<size_t>(default_normal_search_size)) {
+            ray::Cloud tempCloud = pointCloud; // Make a mutable copy for generateNormals
+            surface_normals = tempCloud.generateNormals(default_normal_search_size);
+            if (surface_normals.size() == pointCloud.rayCount()) {
+                normals_valid = true;
+            } else {
+                std::cerr << "Warning: Normal generation (default k) returned " << surface_normals.size()
+                          << " normals for " << pointCloud.rayCount()
+                          << " points. AoI component may be inaccurate." << std::endl;
+            }
+        } else if (pointCloud.rayCount() > 1) {
+            ray::Cloud tempCloud = pointCloud; // Make a mutable copy
+            int adaptive_search_size = std::max(1, static_cast<int>(pointCloud.rayCount()) - 1);
+            surface_normals = tempCloud.generateNormals(adaptive_search_size);
+            if (surface_normals.size() == pointCloud.rayCount()) {
+                normals_valid = true;
+            } else {
+                std::cerr << "Warning: Normal generation (adaptive k) returned " << surface_normals.size()
+                          << " normals for " << pointCloud.rayCount()
+                          << " points. AoI component may be inaccurate." << std::endl;
+            }
+        } else {
+            if (pointCloud.rayCount() > 0) {
+                 std::cerr << "Warning: Only " << pointCloud.rayCount()
+                           << " point(s) in cloud. Cannot generate reliable surface normals. AoI component will use fallback." << std::endl;
+            }
         }
     }
 
     // --- Mixed Pixel Detection Setup ---
     std::unique_ptr<Nabo::NNSearchD> nns;
-    Eigen::MatrixXd cloud_matrix_eigen;
-    if (k_mixed_neighbors > 0 && pointCloud.rayCount() > static_cast<size_t>(k_mixed_neighbors)) {
-        cloud_matrix_eigen.resize(3, pointCloud.rayCount());
-        for (size_t pt_idx = 0; pt_idx < pointCloud.rayCount(); ++pt_idx) {
-            cloud_matrix_eigen.col(pt_idx) = pointCloud.ends[pt_idx];
+    if (is_chunked_mode) {
+        if (!mixed_pixel_warning_issued) {
+            std::cout << "Warning: Chunked mode active. Mixed Pixel detection is disabled. Mixed pixel variance contribution will be zero." << std::endl;
+            mixed_pixel_warning_issued = true;
         }
-        try {
-            nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(cloud_matrix_eigen));
-        } catch (const std::runtime_error& e) { // Changed to std::runtime_error
-            std::cerr << "Nabo KD-tree creation failed (caught as std::runtime_error): " << e.what() << std::endl;
-            nns.reset();
+        // nns remains nullptr, mixed pixel calculation will be skipped.
+    } else {
+        Eigen::MatrixXd cloud_matrix_eigen;
+        if (k_mixed_neighbors > 0 && pointCloud.rayCount() > static_cast<size_t>(k_mixed_neighbors)) {
+            cloud_matrix_eigen.resize(3, pointCloud.rayCount());
+            for (size_t pt_idx = 0; pt_idx < pointCloud.rayCount(); ++pt_idx) {
+                cloud_matrix_eigen.col(pt_idx) = pointCloud.ends[pt_idx];
+            }
+            try {
+                nns.reset(Nabo::NNSearchD::createKDTreeLinearHeap(cloud_matrix_eigen));
+            } catch (const std::runtime_error& e) { // Changed to std::runtime_error
+                std::cerr << "Nabo KD-tree creation failed (caught as std::runtime_error): " << e.what() << std::endl;
+                nns.reset();
+            }
         }
     }
 
@@ -376,6 +396,12 @@ void print_usage(int exit_code = 1) {
     std::cout << "                        Min behind neighbors for mixed pixel detection. Default: 1" << std::endl;
     std::cout << "  --penalty_mixed <value>" << std::endl;
     std::cout << "                        Variance penalty for detected mixed pixels (m^2). Default: 0.5" << std::endl;
+    std::cout << "  --chunk_size <value>" << std::endl;
+    std::cout << "                        Process points in chunks of <N> points. Useful for large files to reduce" << std::endl;
+    std::cout << "                        memory usage. Note: In chunked mode, Angle of Incidence (AoI) and" << std::endl;
+    std::cout << "                        Mixed Pixel uncertainty calculations are currently simplified/disabled," << std::endl;
+    std::cout << "                        potentially affecting accuracy or setting their variance contributions to zero." << std::endl;
+    std::cout << "                        Default: 0 (off)" << std::endl;
     std::cout << "  --help (-h)           Print this usage message." << std::endl;
     // clang-format on
     exit(exit_code);
@@ -397,6 +423,7 @@ int rayNoiseMain(int argc, char* argv[]) {
     ray::IntArgument minFrontMixedArg(1, 50, 1);
     ray::IntArgument minBehindMixedArg(1, 50, 1);
     ray::DoubleArgument penaltyMixedArg(0.0, 100.0, 0.5);
+    ray::IntArgument chunkSizeArg(0, 10000000, 0); // Min 0 (off), Max 10M, Default 0
 
     ray::OptionalFlagArgument helpFlag("help", 'h');
     ray::OptionalKeyValueArgument baseRangeOpt("base_range_accuracy", 'r', &baseRangeAccuracyArg);
@@ -410,12 +437,14 @@ int rayNoiseMain(int argc, char* argv[]) {
     ray::OptionalKeyValueArgument minFrontMixedOpt("min_front_mixed", '\0', &minFrontMixedArg);
     ray::OptionalKeyValueArgument minBehindMixedOpt("min_behind_mixed", '\0', &minBehindMixedArg);
     ray::OptionalKeyValueArgument penaltyMixedOpt("penalty_mixed", '\0', &penaltyMixedArg);
+    ray::OptionalKeyValueArgument chunkSizeOpt("chunk_size", '\0', &chunkSizeArg);
 
     std::vector<ray::FixedArgument*> fixedArgs = {&inputFile, &outputFile};
     std::vector<ray::OptionalArgument*> optionalArgs = {
         &helpFlag, &baseRangeOpt, &baseAngleOpt, &cIntensityOpt, &epsilonOpt,
         &cAoiOpt, &epsilonAoiOpt,
-        &kMixedOpt, &depthThreshMixedOpt, &minFrontMixedOpt, &minBehindMixedOpt, &penaltyMixedOpt
+        &kMixedOpt, &depthThreshMixedOpt, &minFrontMixedOpt, &minBehindMixedOpt, &penaltyMixedOpt,
+        &chunkSizeOpt
     };
 
     if (!ray::parseCommandLine(argc, argv, fixedArgs, optionalArgs)) {
@@ -442,6 +471,7 @@ int rayNoiseMain(int argc, char* argv[]) {
     int min_front_neighbors_mixed = minFrontMixedArg.value();
     int min_behind_neighbors_mixed = minBehindMixedArg.value();
     double variance_mixed_pixel_penalty = penaltyMixedArg.value();
+    int chunk_size = chunkSizeArg.value();
 
     if (epsilon <= 0 || epsilon_aoi <= 0 || depth_threshold_mixed <=0) {
         std::cerr << "Error: Epsilon values (epsilon, epsilon_aoi) and depth_threshold_mixed must be positive." << std::endl;
@@ -451,40 +481,171 @@ int rayNoiseMain(int argc, char* argv[]) {
         std::cerr << "Error: Neighbor counts (k_mixed, min_front_mixed, min_behind_mixed) must be positive." << std::endl;
         print_usage(1);
     }
-
-    ray::Cloud pointCloud;
-    if (!pointCloud.load(input_file_str, true, 0)) {
-        std::cerr << "Error: Could not load point cloud from " << input_file_str << std::endl;
-        return 1;
+    if (chunk_size < 0) { // Should be caught by IntArgument min, but good practice.
+        std::cerr << "Error: chunk_size must be non-negative." << std::endl;
+        print_usage(1);
     }
 
-    if (pointCloud.rayCount() == 0) {
-        std::vector<UncertaintyComponents> empty_uncertainties;
-        if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, empty_uncertainties)) {
-             std::cerr << "Error: Failed to save empty point cloud header." << std::endl;
-             return 1;
+    if (chunk_size > 0) {
+        std::cout << "Chunked processing active with chunk_size: " << chunk_size << std::endl;
+
+        std::ofstream out_ply_stream;
+        out_ply_stream.open(output_file_str, std::ios::binary | std::ios::out);
+        if (!out_ply_stream) {
+            std::cerr << "Error: Cannot open " << output_file_str << " for writing." << std::endl;
+            return 1;
         }
-        std::cout << "Input point cloud is empty. Saved empty PLY with headers to " << output_file_str << std::endl;
-        return 0;
-    }
 
-    if (pointCloud.starts.size() != pointCloud.rayCount() ||
-        pointCloud.ends.size() != pointCloud.rayCount() ||
-        pointCloud.colours.size() != pointCloud.rayCount() ||
-        pointCloud.times.size() != pointCloud.rayCount()) {
-        std::cerr << "Error: Inconsistent data sizes in loaded point cloud." << std::endl;
-        return 1;
-    }
+        unsigned long vertex_count_pos = 0;
+        if (!ray::writeRayNoisePlyHeader(out_ply_stream, vertex_count_pos)) {
+            std::cerr << "Error: Failed to write PLY header to " << output_file_str << std::endl;
+            out_ply_stream.close();
+            return 1;
+        }
 
-    std::vector<UncertaintyComponents> uncertainties = CalculatePointUncertainty(
-        pointCloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon,
-        c_aoi, epsilon_aoi,
-        k_mixed_neighbors, depth_threshold_mixed, min_front_neighbors_mixed,
-        min_behind_neighbors_mixed, variance_mixed_pixel_penalty);
+        unsigned long total_points_written = 0;
+        bool chunk_write_error = false; // Flag to signal error from lambda
 
-    if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainties)) {
-        std::cerr << "Error: Failed to save point cloud with uncertainty to " << output_file_str << std::endl;
-        return 1;
+        // Lambda needs to capture out_ply_stream, total_points_written, output_file_str, and error flag
+        // Also, all the parameters for CalculatePointUncertainty
+        auto apply_chunk = [&](std::vector<Eigen::Vector3d>& starts_vec, // Renamed from 'starts' to avoid conflict if any param had same name
+                               std::vector<Eigen::Vector3d>& ends_vec,
+                               std::vector<double>& times_vec,
+                               std::vector<ray::RGBA>& colours_vec) {
+            if (chunk_write_error) return; // Stop processing if a previous chunk failed to write
+
+            if (ends_vec.empty()) {
+                std::cout << "Received an empty chunk." << std::endl;
+                return;
+            }
+            // std::cout << "Processing chunk of " << ends_vec.size() << " points." << std::endl; // Verbose
+
+            ray::Cloud chunk_cloud;
+            // The input vectors to the lambda are rvalue references if moved from,
+            // but here they are passed as lvalue refs from readPly's internal loop.
+            // To avoid issues with readPly reusing buffers (if it does), we should copy or ensure it's safe.
+            // Assuming readPly provides fresh vectors or we consume them fully.
+            // For safety in this step, let's copy. If performance becomes an issue, std::move could be revisited
+            // with deeper analysis of readPly's behavior.
+            // However, the function signature for readPly's apply is `std::function<void(std::vector<Eigen::Vector3d> &starts, ...`
+            // which means these are lvalues, not rvalues. So std::move is not appropriate here.
+            chunk_cloud.starts = starts_vec;
+            chunk_cloud.ends = ends_vec;
+            chunk_cloud.times = times_vec;
+            chunk_cloud.colours = colours_vec;
+
+            std::vector<UncertaintyComponents> chunk_uncertainties = CalculatePointUncertainty(
+                chunk_cloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon,
+                c_aoi, epsilon_aoi,
+                k_mixed_neighbors, depth_threshold_mixed, min_front_neighbors_mixed,
+                min_behind_neighbors_mixed, variance_mixed_pixel_penalty, true /* is_chunked_mode */);
+
+            // std::cout << "Calculated uncertainties for chunk of " << chunk_cloud.rayCount() << " points." << std::endl; // Verbose
+
+            std::vector<ray::RayNoiseUncertaintyData> rayply_uncertainties;
+            rayply_uncertainties.reserve(chunk_uncertainties.size());
+            for (const auto& src_unc : chunk_uncertainties) {
+                ray::RayNoiseUncertaintyData dest_unc;
+                dest_unc.total_v = src_unc.total_v;
+                dest_unc.range_v = src_unc.range_v;
+                dest_unc.angular_v = src_unc.angular_v;
+                dest_unc.aoi_v = src_unc.aoi_v;
+                dest_unc.mixed_pixel_v = src_unc.mixed_pixel_v;
+                rayply_uncertainties.push_back(dest_unc);
+            }
+
+            if (!ray::writeRayNoisePlyChunk(out_ply_stream,
+                                         chunk_cloud.starts,
+                                         chunk_cloud.ends,
+                                         chunk_cloud.times,
+                                         chunk_cloud.colours,
+                                         rayply_uncertainties)) {
+                std::cerr << "Error: Failed to write chunk to " << output_file_str << std::endl;
+                chunk_write_error = true; // Signal error to stop further processing
+            } else {
+                total_points_written += chunk_cloud.rayCount();
+            }
+        };
+
+        // Note: The lambda signature was: std::vector<Eigen::Vector3d>& starts, std::vector<Eigen::Vector3d>& starts_vec...
+        // This was a typo from previous step. readPly provides 4 vectors.
+        // Corrected lambda signature for ray::readPly's apply function:
+        auto correct_apply_chunk = [&](std::vector<Eigen::Vector3d>& s, // starts
+                                   std::vector<Eigen::Vector3d>& e, // ends
+                                   std::vector<double>& t,      // times
+                                   std::vector<ray::RGBA>& c) { // colours
+            // Call the previous lambda logic with correct variable names
+            apply_chunk(s, e, t, c);
+        };
+
+
+        bool success = ray::readPly(input_file_str, true, correct_apply_chunk, 0, false, chunk_size);
+
+        if (!success && !chunk_write_error) { // if readPly itself failed, not due to our write error
+            std::cerr << "Error: Failed to process input file in chunks: " << input_file_str << std::endl;
+            out_ply_stream.close();
+            return 1;
+        }
+
+        if (chunk_write_error) {
+             std::cerr << "Due to previous error, chunk processing stopped." << std::endl;
+             // Try to finalize with what we have, or just clean up.
+        }
+
+        if (!ray::finalizeRayNoisePlyHeader(out_ply_stream, total_points_written, vertex_count_pos)) {
+            std::cerr << "Error: Failed to finalize PLY header for " << output_file_str << std::endl;
+            out_ply_stream.close();
+            return 1;
+        }
+
+        out_ply_stream.close();
+        if (!chunk_write_error) {
+            std::cout << "Successfully saved " << total_points_written << " points with uncertainty to "
+                      << output_file_str << " (chunked)." << std::endl;
+        } else {
+            std::cout << "Attempted to save point cloud with " << total_points_written
+                      << " points to " << output_file_str << " (chunked), but errors occurred." << std::endl;
+            return 1; // Indicate error
+        }
+
+
+    } else {
+        // Non-Chunked Path (Existing Logic)
+        ray::Cloud pointCloud;
+        if (!pointCloud.load(input_file_str, true, 0)) {
+            std::cerr << "Error: Could not load point cloud from " << input_file_str << std::endl;
+            return 1;
+        }
+
+        if (pointCloud.rayCount() == 0) {
+            std::cout << "Input point cloud is empty (non-chunked path)." << std::endl;
+            std::vector<UncertaintyComponents> empty_uncertainties;
+            if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, empty_uncertainties)) {
+                 std::cerr << "Error: Failed to save empty point cloud header." << std::endl;
+                 return 1;
+            }
+            std::cout << "Saved empty PLY with headers to " << output_file_str << std::endl;
+            return 0;
+        }
+
+        if (pointCloud.starts.size() != pointCloud.rayCount() ||
+            pointCloud.ends.size() != pointCloud.rayCount() ||
+            pointCloud.colours.size() != pointCloud.rayCount() ||
+            pointCloud.times.size() != pointCloud.rayCount()) {
+            std::cerr << "Error: Inconsistent data sizes in loaded point cloud." << std::endl;
+            return 1;
+        }
+
+        std::vector<UncertaintyComponents> uncertainties = CalculatePointUncertainty(
+            pointCloud, base_range_accuracy, base_angle_accuracy, c_intensity, epsilon,
+            c_aoi, epsilon_aoi,
+            k_mixed_neighbors, depth_threshold_mixed, min_front_neighbors_mixed,
+            min_behind_neighbors_mixed, variance_mixed_pixel_penalty, false /* is_chunked_mode */);
+
+        if (!saveRayCloudWithUncertainty(output_file_str, pointCloud, uncertainties)) {
+            std::cerr << "Error: Failed to save point cloud with uncertainty to " << output_file_str << std::endl;
+            return 1;
+        }
     }
 
     return 0;

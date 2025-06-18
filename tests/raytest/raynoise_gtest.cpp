@@ -216,6 +216,85 @@ const RayNoiseTestCaseParams gtest_raynoise_cases[] = {
             d.range_variance = 0.0004;
             d.angular_variance = 0.0000123725;
             return d; }()
+    },
+    // --- Phase 1 Chunking Tests ---
+    {
+        "Basic_Chunked_SmallChunk_P1", "test_basic.ply",
+        {"--c_aoi", "0.1", "--epsilon_aoi", "0.01", // Enable AoI for fallback check
+         "--penalty_mixed", "0.5", // Enable mixed for fallback check (should be 0)
+         "--c_intensity", "0.5", "--epsilon", "0.01",
+         "--chunk_size", "2"}, // Small chunk size
+        0, // Point index to check
+        []{ RayNoiseTestOutput d; // Expected values for point 0 from Basic_P1
+            d.total_variance = 0.0006469135802469136 /*range*/ + 0.00001225 /*angular*/ + (0.1/0.01) /*AoI fallback*/ + 0.0 /*Mixed fallback*/;
+            d.range_variance = 0.0006469135802469136;
+            d.angular_variance = 0.00001225;
+            d.aoi_variance = (0.1/0.01); // c_aoi / epsilon_aoi
+            d.mixed_pixel_variance = 0.0; // Simplified
+            return d; }()
+    },
+    {
+        "AoI_Chunked_P1_VerifySimplification", "test_aoi.ply",
+        { // Args from AoI_P1_check, but with chunk_size
+         "--c_intensity", "0", "--penalty_mixed", "0",
+         "--c_aoi", "0.1", "--epsilon_aoi", "0.01", // Default AoI params
+         "--chunk_size", "3"},
+        0, // Point index from AoI_P1_check
+        []{ RayNoiseTestOutput d; // Base values from AoI_P1_check
+            d.range_variance = 0.0004;
+            d.angular_variance = 0.0000245;
+            // AoI is now fallback
+            d.aoi_variance = (0.1/0.01); // c_aoi / epsilon_aoi (defaults)
+            d.mixed_pixel_variance = 0.0; // Simplified (was 0 anyway)
+            d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
+            return d; }()
+    },
+    {
+        "Mixed_Chunked_P_VerifySimplification", "test_mixed.ply",
+        { // Args from Mixed_P_test, but with chunk_size
+         "--c_intensity", "0",
+         "--c_aoi", "0.1", "--epsilon_aoi", "0.01", // Enable AoI for fallback check
+         "--penalty_mixed", "0.5", // This was the original penalty
+         "--k_mixed", "8", "--depth_thresh_mixed", "0.05", "--min_front_mixed", "1", "--min_behind_mixed", "1", // Mixed params
+         "--chunk_size", "5"},
+        0, // Point index from Mixed_P_test
+        []{ RayNoiseTestOutput d; // Base values from Mixed_P_test
+            d.range_variance = 0.0004;
+            d.angular_variance = 0.0000275625;
+            d.aoi_variance = (0.1/0.01); // AoI is now fallback
+            d.mixed_pixel_variance = 0.0; // Mixed pixel is simplified to 0
+            d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
+            return d; }()
+    },
+    {
+        "Basic_Chunked_LargeChunk_P1", "test_basic.ply", // Chunk size larger than file
+        {"--c_aoi", "0.1", "--epsilon_aoi", "0.01",
+         "--penalty_mixed", "0", // keep mixed off for this basic test
+         "--c_intensity", "0.5", "--epsilon", "0.01",
+         "--chunk_size", "100"}, // test_basic.ply has few points (e.g. <10)
+        0,
+        []{ RayNoiseTestOutput d; // Same as Basic_Chunked_SmallChunk_P1 because simplifications apply even if one chunk
+            d.total_variance = 0.0006469135802469136 + 0.00001225 + (0.1/0.01) + 0.0;
+            d.range_variance = 0.0006469135802469136;
+            d.angular_variance = 0.00001225;
+            d.aoi_variance = (0.1/0.01);
+            d.mixed_pixel_variance = 0.0;
+            return d; }()
+    },
+    {
+        "Basic_Chunked_ExplicitAoIEpsilon_P1", "test_basic.ply",
+        {"--c_aoi", "0.2", "--epsilon_aoi", "0.05", // Non-default AoI params
+         "--penalty_mixed", "0",
+         "--c_intensity", "0.5", "--epsilon", "0.01",
+         "--chunk_size", "2"},
+        0,
+        []{ RayNoiseTestOutput d;
+            d.range_variance = 0.0006469135802469136; // from Basic_P1
+            d.angular_variance = 0.00001225;      // from Basic_P1
+            d.aoi_variance = (0.2/0.05);          // Explicit c_aoi / epsilon_aoi
+            d.mixed_pixel_variance = 0.0;         // Simplified
+            d.total_variance = d.range_variance + d.angular_variance + d.aoi_variance + d.mixed_pixel_variance;
+            return d; }()
     }
 };
 

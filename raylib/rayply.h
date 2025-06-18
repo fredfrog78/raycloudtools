@@ -72,6 +72,28 @@ void RAYLIB_EXPORT writePointCloudChunkEnd(std::ofstream &out);
 /// Simple function for converting a ray cloud according to the per-ray function @c apply
 bool convertCloud(const std::string &in_name, const std::string &out_name,
                   std::function<void(Eigen::Vector3d &start, Eigen::Vector3d &ends, double &time, RGBA &colour)> apply);
+
+// Structure for passing uncertainty data for raynoise output
+struct RayNoiseUncertaintyData {
+    double total_v;
+    double range_v;
+    double angular_v;
+    double aoi_v;
+    double mixed_pixel_v;
+};
+
+// Functions for chunked PLY writing with raynoise specific fields
+bool RAYLIB_EXPORT writeRayNoisePlyHeader(std::ofstream &out, unsigned long &vertex_count_pos);
+bool RAYLIB_EXPORT writeRayNoisePlyChunk(
+    std::ofstream &out,
+    const std::vector<Eigen::Vector3d> &starts,
+    const std::vector<Eigen::Vector3d> &ends,
+    const std::vector<double> &times,
+    const std::vector<RGBA> &colours,
+    const std::vector<RayNoiseUncertaintyData> &uncertainties
+);
+bool RAYLIB_EXPORT finalizeRayNoisePlyHeader(std::ofstream &out, unsigned long total_points, unsigned long vertex_count_pos);
+
 }  // namespace ray
 
 #endif  // RAYLIB_RAYPLY_H
