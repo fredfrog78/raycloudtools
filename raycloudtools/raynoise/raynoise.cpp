@@ -470,6 +470,29 @@ void print_usage(int exit_code = 1) {
     exit(exit_code);
 }
 
+// Forward declarations
+bool executePass1_GenerateNormalsAndIntermediatePly(
+    const std::string& input_ply_file,
+    const std::string& intermediate_ply_file,
+    int k_for_normals,
+    size_t primary_block_size,
+    size_t overlap_size,
+    ray::Progress& progress_reporter
+);
+
+bool executePass2_CalculateUncertainty(
+    const std::string& intermediate_ply_file,
+    const std::string& final_output_ply_file,
+    double base_range_accuracy, double base_angle_accuracy,
+    double c_intensity, double epsilon,
+    double c_aoi, double epsilon_aoi,
+    int k_mixed_neighbors, double depth_threshold_mixed,
+    int min_front_neighbors_mixed, int min_behind_neighbors_mixed,
+    double variance_mixed_pixel_penalty,
+    size_t chunk_size_pass2,
+    ray::Progress& progress_reporter
+);
+
 int rayNoiseMain(int argc, char* argv[]) {
     ray::FileArgument inputFile;
     ray::FileArgument outputFile;
@@ -668,7 +691,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
     int k_for_normals, // k for k-NN normal estimation
     size_t primary_block_size, // Number of points in a primary block
     size_t overlap_size, // Number of points for overlap on each side
-    ray::Progress& progress_reporter); // Existing declaration is fine
+    ray::Progress& /*progress_reporter*/) // Existing declaration is fine
 
 
 // Pass 2: Read intermediate PLY (with Pass 1 normals), calculate uncertainty, write final PLY
@@ -683,7 +706,7 @@ bool executePass2_CalculateUncertainty(
     int min_front_neighbors_mixed, int min_behind_neighbors_mixed,
     double variance_mixed_pixel_penalty,
     size_t chunk_size_pass2, // Chunk size for reading intermediate and processing in Pass 2
-    ray::Progress& progress_reporter) // TODO: Integrate progress reporting
+    ray::Progress& /*progress_reporter*/) // TODO: Integrate progress reporting
 {
     std::cout << "Starting Pass 2: Calculating uncertainty using Pass 1 normals." << std::endl;
     std::cout << "  Intermediate Input: " << intermediate_ply_file << std::endl;
@@ -819,7 +842,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
     int k_for_normals, // k for k-NN normal estimation
     size_t primary_block_size, // Number of points in a primary block
     size_t overlap_size, // Number of points for overlap on each side
-    ray::Progress& progress_reporter) // TODO: Integrate progress reporting
+    ray::Progress& /*progress_reporter*/) // TODO: Integrate progress reporting
 {
     std::cout << "Starting Pass 1: Generating normals and writing intermediate PLY." << std::endl;
     std::cout << "  Input: " << input_ply_file << std::endl;
@@ -848,13 +871,16 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
     // Buffers for managing overlaps and primary data blocks
     // Using std::vector for now. std::deque might be more efficient for remove-from-front,
     // but given fixed block processing, vector move/copy might be okay.
-    std::vector<Eigen::Vector3d> starts_prev_overlap, ends_prev_overlap, times_prev_overlap;
+    std::vector<Eigen::Vector3d> starts_prev_overlap, ends_prev_overlap;
+    std::vector<double> times_prev_overlap;
     std::vector<ray::RGBA> colours_prev_overlap;
 
-    std::vector<Eigen::Vector3d> starts_curr_primary, ends_curr_primary, times_curr_primary;
+    std::vector<Eigen::Vector3d> starts_curr_primary, ends_curr_primary;
+    std::vector<double> times_curr_primary;
     std::vector<ray::RGBA> colours_curr_primary;
 
-    std::vector<Eigen::Vector3d> starts_next_overlap_accum, ends_next_overlap_accum, times_next_overlap_accum;
+    std::vector<Eigen::Vector3d> starts_next_overlap_accum, ends_next_overlap_accum;
+    std::vector<double> times_next_overlap_accum;
     std::vector<ray::RGBA> colours_next_overlap_accum;
 
     std::vector<Eigen::Vector3d> normals_for_primary_block; // To store computed normals
@@ -871,7 +897,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
     auto process_block_for_normals_lambda =
         [&](std::vector<Eigen::Vector3d>& chunk_starts,
             std::vector<Eigen::Vector3d>& chunk_ends,
-            std::vector<double>& chunk_times,
+            std::vector<double>& chunk_times, // Ensure this is std::vector<double>
             std::vector<ray::RGBA>& chunk_colours,
             bool is_final_chunk_from_readply) { // readPly needs to signal this
 
@@ -890,6 +916,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
 
                 starts_curr_primary.insert(starts_curr_primary.end(), chunk_starts.begin() + input_chunk_offset, chunk_starts.begin() + input_chunk_offset + num_to_add);
                 ends_curr_primary.insert(ends_curr_primary.end(), chunk_ends.begin() + input_chunk_offset, chunk_ends.begin() + input_chunk_offset + num_to_add);
+                // Ensure data from chunk_times (std::vector<double>) is inserted into times_curr_primary (std::vector<double>)
                 times_curr_primary.insert(times_curr_primary.end(), chunk_times.begin() + input_chunk_offset, chunk_times.begin() + input_chunk_offset + num_to_add);
                 colours_curr_primary.insert(colours_curr_primary.end(), chunk_colours.begin() + input_chunk_offset, chunk_colours.begin() + input_chunk_offset + num_to_add);
 
@@ -905,6 +932,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
 
                 starts_next_overlap_accum.insert(starts_next_overlap_accum.end(), chunk_starts.begin() + input_chunk_offset, chunk_starts.begin() + input_chunk_offset + num_to_add);
                 ends_next_overlap_accum.insert(ends_next_overlap_accum.end(), chunk_ends.begin() + input_chunk_offset, chunk_ends.begin() + input_chunk_offset + num_to_add);
+                // Ensure data from chunk_times (std::vector<double>) is inserted into times_next_overlap_accum (std::vector<double>)
                 times_next_overlap_accum.insert(times_next_overlap_accum.end(), chunk_times.begin() + input_chunk_offset, chunk_times.begin() + input_chunk_offset + num_to_add);
                 colours_next_overlap_accum.insert(colours_next_overlap_accum.end(), chunk_colours.begin() + input_chunk_offset, chunk_colours.begin() + input_chunk_offset + num_to_add);
 
@@ -961,7 +989,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
                     if (nns) { // Only proceed if KD-tree was successfully built
                         static bool insufficient_neighbors_warning_issued_pass1 = false;
                         for (size_t i = 0; i < n_curr; ++i) {
-                            const Eigen::Vector3d& current_query_point = ends_curr_primary[i];
+                            // const Eigen::Vector3d& current_query_point = ends_curr_primary[i]; // Unused
 
                             Eigen::VectorXi indices_eigen(k_for_normals);
                             Eigen::VectorXd dists2_eigen(k_for_normals);
@@ -1040,11 +1068,13 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
                     size_t start_idx = ends_curr_primary.size() - overlap_size;
                     starts_prev_overlap.assign(starts_curr_primary.begin() + start_idx, starts_curr_primary.end());
                     ends_prev_overlap.assign(ends_curr_primary.begin() + start_idx, ends_curr_primary.end());
+                    // Ensure times_curr_primary (std::vector<double>) is assigned to times_prev_overlap (std::vector<double>)
                     times_prev_overlap.assign(times_curr_primary.begin() + start_idx, times_curr_primary.end());
                     colours_prev_overlap.assign(colours_curr_primary.begin() + start_idx, colours_curr_primary.end());
                 } else if (overlap_size > 0) { // curr_primary is smaller than overlap_size (e.g. end of file)
                      starts_prev_overlap = starts_curr_primary; // take all of it
                      ends_prev_overlap = ends_curr_primary;
+                     // Ensure times_curr_primary (std::vector<double>) is assigned to times_prev_overlap (std::vector<double>)
                      times_prev_overlap = times_curr_primary;
                      colours_prev_overlap = colours_curr_primary;
                 }
@@ -1053,6 +1083,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
                 // Next accumulated overlap becomes new current primary
                 starts_curr_primary = std::move(starts_next_overlap_accum); // Efficiently move data
                 ends_curr_primary = std::move(ends_next_overlap_accum);
+                // Ensure times_next_overlap_accum (std::vector<double>) is moved to times_curr_primary (std::vector<double>)
                 times_curr_primary = std::move(times_next_overlap_accum);
                 colours_curr_primary = std::move(colours_next_overlap_accum);
 
@@ -1060,7 +1091,9 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
 
                 // Clear accumulator for next overlap (already moved from)
                 starts_next_overlap_accum.clear(); ends_next_overlap_accum.clear();
-                times_next_overlap_accum.clear(); colours_next_overlap_accum.clear();
+                // Ensure times_next_overlap_accum (std::vector<double>) is cleared
+                times_next_overlap_accum.clear();
+                colours_next_overlap_accum.clear();
                 points_in_next_overlap_buf = 0;
 
                 first_block_processed = true;
@@ -1096,7 +1129,8 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
 
     auto readply_adapter_lambda =
         [&](std::vector<Eigen::Vector3d>& s, std::vector<Eigen::Vector3d>& e,
-            std::vector<double>& t, std::vector<ray::RGBA>& c) {
+            std::vector<double>& t, // Ensure this is std::vector<double>
+            std::vector<ray::RGBA>& c) {
         process_block_for_normals_lambda(s, e, t, c, false); // Assume not final during readPly calls
     };
 
@@ -1112,7 +1146,7 @@ bool executePass1_GenerateNormalsAndIntermediatePly(
     // to process any remaining data in buffers.
     if (!pass1_error_occurred) {
         std::vector<Eigen::Vector3d> empty_starts, empty_ends;
-        std::vector<double> empty_times;
+        std::vector<double> empty_times; // Ensure this is std::vector<double>
         std::vector<ray::RGBA> empty_colours;
         std::cout << "Flushing remaining data for Pass 1..." << std::endl;
         process_block_for_normals_lambda(empty_starts, empty_ends, empty_times, empty_colours, true);
