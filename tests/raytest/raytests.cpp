@@ -59,16 +59,19 @@ namespace raytest
     }
   }
 
-  /// Creates two copies of the same room with a rotational difference, then aligns the first onto the second 
+  /// Creates two copies of the same room with a rotational difference, then aligns the first onto the second
   TEST(Basic, RayAlign)
   {
     EXPECT_EQ(command("raycreate room 1"), 0);
     EXPECT_EQ(copy("room.ply room2.ply"), 0);
-    EXPECT_EQ(command("rayrotate room2.ply 0,0,35"), 0);
-    EXPECT_EQ(command("rayalign room.ply room2.ply"), 0);
-    ray::Cloud cloud;
-    EXPECT_TRUE(cloud.load("room_aligned.ply"));
-    compareMoments(cloud.getMoments(), {-0.0618268, -0.077552, 0.0531072, 7.58334e-08, 7.97642e-08, 1.93877e-08, -0.180532, -0.219257, 0.0654452, 2.47241, 2.08183, 1.28226, 17.539, 10.1994, 0.304682, 0.761892, 0.429502, 0.987362, 0.318932, 0.225742, 0.389901, 0.111705});  }
+    EXPECT_EQ(command("rayrotate room2.ply 10,20,30"), 0);
+    EXPECT_EQ(command("rayalign room2.ply room.ply"), 0);
+    ray::Cloud cloud, cloud2;
+    EXPECT_TRUE(cloud.load("room2_aligned.ply"));
+    EXPECT_TRUE(cloud2.load("room.ply"));
+    Eigen::ArrayXd moments = cloud2.getMoments();
+    compareMoments(cloud.getMoments(), std::vector<double>(moments.data(), moments.data() + moments.size()), 0.11);
+  }
 
   /// Colours a room according to the normal direction of the surfaces, comparing to the expected results
   TEST(Basic, RayColour)

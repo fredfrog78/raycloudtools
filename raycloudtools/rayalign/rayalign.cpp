@@ -12,6 +12,7 @@
 #include "raylib/raypose.h"
 
 #include <nabo/nabo.h>
+#include <Eigen/Geometry>
 
 #include <cstdio>
 #include <cstdlib>
@@ -58,19 +59,22 @@ int rayAlign(int argc, char *argv[])
     if (!clouds[1].load(cloud_b.name()))
       usage();
 
-    // Here we pick two distant points in the cloud as an independent method of determining the total transformation
+    // Here we pick three distant points in the cloud as an independent method of determining the total transformation
     // applied
-    size_t min_i = 0, max_i = 0;
+    size_t min_i = 0, max_i = 0, min_j = 0;
     for (size_t i = 0; i < clouds[0].ends.size(); i++)
     {
       if (clouds[0].ends[i][0] < clouds[0].ends[min_i][0])
         min_i = i;
       if (clouds[0].ends[i][0] > clouds[0].ends[max_i][0])
         max_i = i;
+      if (clouds[0].ends[i][1] < clouds[0].ends[min_j][1])
+        min_j = i;
     }
-    Eigen::Vector3d pos1 = clouds[0].ends[min_i];
-    Eigen::Vector3d dir1 =
-      Eigen::Vector3d(clouds[0].ends[max_i][0] - pos1[0], clouds[0].ends[max_i][1] - pos1[1], 0).normalized();
+    Eigen::Matrix3Xd p_orig(3, 3);
+    p_orig.col(0) = clouds[0].ends[min_i];
+    p_orig.col(1) = clouds[0].ends[max_i];
+    p_orig.col(2) = clouds[0].ends[min_j];
 
     bool local_only = local.isSet();
     bool non_rigid = nonrigid.isSet();
@@ -85,17 +89,22 @@ int rayAlign(int argc, char *argv[])
     ray::FineAlignment fineAlign(clouds, non_rigid, verbose);
     fineAlign.align();
 
-    // Now we calculate the rigid transformation from the change in the position of the two points:
-    Eigen::Vector3d pos2 = clouds[0].ends[min_i];
-    Eigen::Vector3d dir2 =
-      Eigen::Vector3d(clouds[0].ends[max_i][0] - pos2[0], clouds[0].ends[max_i][1] - pos2[1], 0).normalized();
-    double angle = std::atan2((dir1.cross(dir2))[2], dir1.dot(dir2));
-    Eigen::Vector3d rotated_pos1(pos1[0] * std::cos(angle) - pos1[1] * std::sin(angle),
-                                 pos1[0] * std::sin(angle) + pos1[1] * std::cos(angle), pos1[2]);
-    Eigen::Vector3d dif = pos2 - rotated_pos1;
+    // Now we calculate the rigid transformation from the change in the position of the three points:
+    Eigen::Matrix3Xd p_aligned(3, 3);
+    p_aligned.col(0) = clouds[0].ends[min_i];
+    p_aligned.col(1) = clouds[0].ends[max_i];
+    p_aligned.col(2) = clouds[0].ends[min_j];
+
+    Eigen::Matrix4d transform_matrix = Eigen::umeyama(p_orig, p_aligned, false);
+    Eigen::Matrix3d rotation = transform_matrix.block<3,3>(0,0);
+    Eigen::Vector3d translation = transform_matrix.block<3,1>(0,3);
+
+    Eigen::Vector3d euler_angles = rotation.eulerAngles(0, 1, 2); // roll, pitch, yaw
     std::cout << "Transformation of " << cloud_a.nameStub() << ":" << std::endl;
-    std::cout << "          rotation: (0, 0, " << angle * 180.0 / ray::kPi << ") degrees " << std::endl;
-    std::cout << "  then translation: (" << dif.transpose() << ")" << std::endl;
+    std::cout << "          rotation: (" << euler_angles[0] * 180.0 / ray::kPi << ", "
+              << euler_angles[1] * 180.0 / ray::kPi << ", "
+              << euler_angles[2] * 180.0 / ray::kPi << ") degrees " << std::endl;
+    std::cout << "  then translation: (" << translation.transpose() << ")" << std::endl;
     if (non_rigid)
     {
       std::cout << "This rigid transformation is approximate as a non-rigid transformation was applied" << std::endl;
